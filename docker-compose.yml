@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  forgeagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: forgeagent-v1
+    ports:
+      - "8000:8000"
+    environment:
+      - FORGEAGENT_HOST=0.0.0.0
+      - FORGEAGENT_PORT=8000
+      - FORGEAGENT_EXECUTION_MODE=docker
+      - FORGEAGENT_DEFAULT_AI_CONNECTOR=mock
+    volumes:
+      - forgeagent_data:/app/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  forgeagent_data:
