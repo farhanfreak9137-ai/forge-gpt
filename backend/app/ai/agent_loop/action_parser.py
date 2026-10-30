@@ -103,3 +103,4 @@ class ActionParser:
             command_actions=command_actions,
             has_actions=has_actions,
         )
+

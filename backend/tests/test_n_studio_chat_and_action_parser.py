@@ -118,3 +118,4 @@ async def test_studio_api_full_workflow(tmp_path):
         assert manifest["total_files"] >= 1
         found_paths = [f["path"].replace("\\", "/") for f in manifest["files"]]
         assert any("src/hello.py" in p for p in found_paths)
+

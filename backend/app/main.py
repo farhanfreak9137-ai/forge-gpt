@@ -1,3 +1,10 @@
+import sys
+import asyncio
+
+# On Windows, Playwright requires ProactorEventLoop to spawn browser subprocesses
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -76,6 +83,17 @@ async def health_check():
         "app": settings.app_name,
         "version": settings.version,
         "execution_mode": settings.execution_mode,
+    }
+
+
+@app.get("/api/v1/debug-loop")
+async def get_debug_loop():
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return {
+        "loop_type": str(type(loop)),
+        "is_proactor": isinstance(loop, getattr(asyncio, "ProactorEventLoop", None)),
+        "policy": str(type(asyncio.get_event_loop_policy())),
     }
 
 

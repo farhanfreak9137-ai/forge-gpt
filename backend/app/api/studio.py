@@ -31,7 +31,7 @@ async def chat_with_agent(data: ChatRequest):
     try:
         reply = await chat_orchestrator.send_user_message(
             message=data.message,
-            workspace_path=data.workspace_path or str(settings.base_dir),
+            workspace_path=data.workspace_path or str(settings.base_dir.parent),
             auto_pilot=data.auto_pilot,
             connector_name=data.connector_name,
         )
@@ -56,7 +56,7 @@ async def clear_chat_history():
 @router.get("/files")
 async def get_workspace_files(workspace_path: Optional[str] = Query(None)):
     """Retrieve scanned workspace file list and directory tree for the IDE panel."""
-    target_path = Path(workspace_path or settings.base_dir).resolve()
+    target_path = Path(workspace_path or settings.base_dir.parent).resolve()
     if not target_path.exists():
         raise HTTPException(status_code=404, detail="Workspace directory not found")
 
@@ -74,7 +74,7 @@ async def get_workspace_files(workspace_path: Optional[str] = Query(None)):
 @router.get("/file-content")
 async def get_file_content(path: str = Query(...), workspace_path: Optional[str] = Query(None)):
     """Read a specific file in the workspace to display in Monaco editor."""
-    target_ws = Path(workspace_path or settings.base_dir).resolve()
+    target_ws = Path(workspace_path or settings.base_dir.parent).resolve()
     fm = SafeFileManager(str(target_ws))
     try:
         content = fm.read_file(path)
@@ -86,10 +86,11 @@ async def get_file_content(path: str = Query(...), workspace_path: Optional[str]
 @router.post("/save-file")
 async def save_file_content(data: SaveFileRequest):
     """Directly save file modifications from Monaco editor."""
-    target_ws = Path(data.workspace_path or settings.base_dir).resolve()
+    target_ws = Path(data.workspace_path or settings.base_dir.parent).resolve()
     fm = SafeFileManager(str(target_ws))
     try:
         hash_val = fm.write_file_atomic(data.file_path, data.content)
         return {"status": "SAVED", "path": data.file_path, "sha256": hash_val}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

@@ -13,7 +13,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host " Starting ForgeAgent V1 (Local Windows Host)" -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 
-# 1. Start Backend in Background Process
+# 1. Start Backend in Background Process (without --reload because Playwright subprocesses require Windows Proactor loop)
 Write-Host "`n[1/2] Launching Backend on http://127.0.0.1:8000..." -ForegroundColor Cyan
 $BackendProcess = Start-Process -FilePath "$RootPath\backend\.venv\Scripts\python.exe" `
     -ArgumentList "-m uvicorn app.main:app --host 127.0.0.1 --port 8000" `
