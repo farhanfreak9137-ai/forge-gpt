@@ -65,9 +65,11 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             if not ta:
                 raise RuntimeError("Could not find prompt textarea on ChatGPT page")
 
-            # Click, focus, and type prompt directly as the user typed it
+            # Click, focus, clear existing text, and type prompt
             await ta.click()
             await ta.focus()
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
             
             full_prompt = prompt
             await page.keyboard.type(full_prompt, delay=10)
@@ -152,6 +154,18 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                     return AIResponseEnvelope.model_validate(parsed)
                 except Exception as e:
                     logger.warning(f"Could not parse JSON payload from ChatGPT: {e}")
+
+            # Check if ChatGPT returned a login gate / guest session modal instead of an actual answer
+            is_login_wall = any(w.lower() in extracted_text.lower() for w in [
+                "log in to use",
+                "sign up or log in",
+                "get smarter responses, upload files",
+                "email is not valid",
+            ])
+            if is_login_wall:
+                raise RuntimeError(
+                    "You are not logged into ChatGPT in Microsoft Edge. Please log into your ChatGPT account in the Edge browser window on your screen, then send your message again."
+                )
 
             # If natural language text response, wrap in protocol report
             clean_reply = re.sub(r"\[ForgeAgent Metadata:[^\]]*\]", "", extracted_text).strip()

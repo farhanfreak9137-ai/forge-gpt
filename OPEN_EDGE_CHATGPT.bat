@@ -23,3 +23,4 @@ if "%EDGE_EXE%"=="" (
 )
 
 echo Microsoft Edge is open on your screen!
+

@@ -71,6 +71,8 @@ class BrowserManager:
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
+                    "--start-maximized",
+                    "--new-window",
                 ],
                 "viewport": None,
             }
