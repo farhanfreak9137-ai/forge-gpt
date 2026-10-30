@@ -162,3 +162,4 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             raise
         finally:
             await page.close()
+

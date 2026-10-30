@@ -43,3 +43,4 @@ async def test_m_chatgpt_edge_live_interaction():
     analysis_text = envelope.payload.get("analysis", "") or envelope.payload.get("summary", "")
     assert len(analysis_text) > 0, "No response text extracted from ChatGPT in Edge"
     print(f"\n[Test M] Live reply captured from ChatGPT via Microsoft Edge:\n{analysis_text}\n")
+

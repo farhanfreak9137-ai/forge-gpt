@@ -15,11 +15,11 @@ class BrowserManager:
     def __init__(
         self,
         profile_dir: Optional[Path] = None,
-        headless: bool = True,
+        headless: Optional[bool] = None,
         browser_channel: str = "msedge",
     ):
         self.profile_dir = profile_dir or settings.browser_profile_dir
-        self.headless = headless
+        self.headless = settings.browser_headless if headless is None else headless
         self.browser_channel = browser_channel
         self._playwright: Optional[Playwright] = None
         self._context: Optional[BrowserContext] = None

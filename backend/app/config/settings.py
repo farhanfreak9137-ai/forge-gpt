@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # AI Connector Default Settings
     default_ai_connector: str = "mock"  # "mock", "openai", "ollama", "browser_handoff", "browser_automation", "chatgpt_edge"
     chatgpt_edge_url: str = "https://chatgpt.com"
+    browser_headless: bool = False  # Set to False to watch Edge open and type live
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: Optional[str] = None
     openai_model_id: str = "gpt-4o"
