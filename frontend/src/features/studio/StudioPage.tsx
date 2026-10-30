@@ -17,6 +17,8 @@ import {
   Code2,
   Sparkles,
   ExternalLink,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StudioMessage, StudioWorkspaceManifest } from '../../types';
@@ -39,8 +41,64 @@ export const StudioPage: React.FC = () => {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [fileFilter, setFileFilter] = useState('');
   const [expandedCommands, setExpandedCommands] = useState<Record<string, boolean>>({});
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const handleCopyText = (id: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const renderMessageContent = (content: string) => {
+    if (!content) return null;
+
+    // Split markdown code blocks: ```lang ... ```
+    const parts = content.split(/(```[\s\S]*?```)/g);
+
+    return parts.map((part, pIdx) => {
+      if (part.startsWith('```') && part.endsWith('```')) {
+        const firstLineEnd = part.indexOf('\n');
+        const lang = firstLineEnd !== -1 ? part.slice(3, firstLineEnd).trim() : '';
+        const code = firstLineEnd !== -1 ? part.slice(firstLineEnd + 1, -3).trim() : part.slice(3, -3).trim();
+
+        return (
+          <div key={pIdx} className="my-2.5 rounded-lg border border-slate-800 bg-slate-950 overflow-hidden text-xs">
+            <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800/80 text-[11px] text-slate-400">
+              <span className="font-mono text-emerald-400 font-semibold">{lang || 'code'}</span>
+              <button
+                onClick={() => handleCopyText(`code-${pIdx}`, code)}
+                className="flex items-center gap-1 hover:text-white transition text-slate-400"
+                title="Copy code"
+              >
+                {copiedId === `code-${pIdx}` ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-400" />
+                    <span className="text-emerald-400">Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <pre className="p-3 overflow-x-auto font-mono text-slate-200 text-xs leading-relaxed selection:bg-emerald-500/30">
+              <code>{code}</code>
+            </pre>
+          </div>
+        );
+      }
+
+      return (
+        <div key={pIdx} className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed my-1">
+          {part}
+        </div>
+      );
+    });
+  };
 
   // Load chat history & workspace files on mount
   useEffect(() => {
@@ -324,12 +382,31 @@ export const StudioPage: React.FC = () => {
                 return (
                   <div
                     key={msg.id || index}
-                    className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+                    className={`flex flex-col group ${isUser ? 'items-end' : 'items-start'}`}
                   >
                     <div className="flex items-center gap-2 mb-1 px-1 text-[11px] text-slate-500">
                       <span>{isUser ? 'You' : 'ForgeAgent (ChatGPT Brain)'}</span>
                       <span>•</span>
                       <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      {!isUser && (
+                        <button
+                          onClick={() => handleCopyText(msg.id || String(index), msg.clean_message || msg.text)}
+                          className="opacity-0 group-hover:opacity-100 transition text-[11px] text-slate-400 hover:text-white flex items-center gap-1 ml-2"
+                          title="Copy full message"
+                        >
+                          {copiedId === (msg.id || String(index)) ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-400">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
 
                     <div
@@ -339,9 +416,9 @@ export const StudioPage: React.FC = () => {
                           : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
                       }`}
                     >
-                      {/* Clean Message Body */}
-                      <div className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed">
-                        {msg.clean_message || msg.text}
+                      {/* Formatted Message Body with Code Block Cards */}
+                      <div>
+                        {renderMessageContent(msg.clean_message || msg.text)}
                       </div>
 
                       {/* File Modifications ("The Hands" executed changes) */}

@@ -78,11 +78,17 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             await page.keyboard.press("Control+A")
             await page.keyboard.press("Backspace")
             
+            # 1. Count assistant turns BEFORE submitting the new prompt
+            prior_assistant_elements = await page.query_selector_all('[data-message-author-role="assistant"]')
+            prior_count = len(prior_assistant_elements)
+            logger.info(f"Prior assistant message count before sending: {prior_count}")
+
+            # 2. Type prompt directly as user wrote it
             full_prompt = prompt
             await page.keyboard.type(full_prompt, delay=10)
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(500)
 
-            # Locate and click send button or press Enter
+            # 3. Locate and click send button or press Enter
             send_btn = await page.query_selector(
                 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]'
             )
@@ -93,49 +99,75 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 await page.keyboard.press("Enter")
                 logger.info("Pressed Enter to submit prompt in Edge.")
 
-            # Await response generation & stream completion
-            logger.info("Waiting for ChatGPT response to complete in Edge...")
+            # 4. Wait for the NEW assistant message container to appear
+            logger.info("Waiting for new assistant turn to appear in Edge...")
+            new_turn = None
+            for _ in range(20):  # wait up to 10 seconds for turn to spawn
+                await page.wait_for_timeout(500)
+                current_assistant_elements = await page.query_selector_all('[data-message-author-role="assistant"]')
+                if len(current_assistant_elements) > prior_count:
+                    new_turn = current_assistant_elements[-1]
+                    logger.info(f"New assistant turn detected (turn #{len(current_assistant_elements)}).")
+                    break
+
+            if not new_turn:
+                # Fallback to last assistant or article container
+                current_assistant_elements = await page.query_selector_all('[data-message-author-role="assistant"]')
+                if current_assistant_elements:
+                    new_turn = current_assistant_elements[-1]
+                else:
+                    articles = await page.query_selector_all('article')
+                    if articles:
+                        new_turn = articles[-1]
+
+            # 5. Wait for ChatGPT to FINISH streaming the full response
+            logger.info("Waiting for ChatGPT to finish generating response...")
             extracted_text = ""
-            for _ in range(30):  # poll up to 60 seconds
-                await page.wait_for_timeout(2000)
+            last_text_len = 0
+            stable_ticks = 0
 
-                # Check if still streaming
+            for _ in range(60):  # poll up to 60-120 seconds
+                await page.wait_for_timeout(1000)
+
+                # Check if stop generating button is active
                 stop_btn = await page.query_selector(
-                    'button[aria-label="Stop streaming"], button[aria-label="Stop generating"]'
+                    'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
                 )
-                
-                # 1. Try to extract ONLY the latest assistant turn container
-                assistant_elements = await page.query_selector_all('[data-message-author-role="assistant"]')
-                if not assistant_elements:
-                    assistant_elements = await page.query_selector_all('article')
 
-                if assistant_elements:
-                    latest_turn = assistant_elements[-1]
-                    raw_turn_text = (await latest_turn.inner_text() or "").strip()
-                    # Exclude user's own prompt if matched
-                    if raw_turn_text and raw_turn_text != full_prompt.strip():
-                        extracted_text = raw_turn_text
-
-                # 2. Fallback to filtered paragraphs if assistant turn selector was not found
-                if not extracted_text:
+                if new_turn:
+                    current_text = (await new_turn.inner_text() or "").strip()
+                else:
+                    # Fallback to paragraph extraction
                     paragraphs = await page.query_selector_all('p')
-                    meaningful_paragraphs = []
-                    for p in paragraphs:
-                        txt = (await p.text_content() or "").strip()
-                        if txt and not any(ign in txt for ign in [
-                            "ChatGPT is AI and can make mistakes",
-                            "Log in to get answers",
-                            "Turn questions into research",
-                            "Try advanced features",
-                            "Choose an account",
-                        ]) and txt != full_prompt.strip():
-                            meaningful_paragraphs.append(txt)
+                    meaningful = [
+                        (await p.text_content() or "").strip()
+                        for p in paragraphs
+                        if (await p.text_content() or "").strip() != full_prompt.strip()
+                    ]
+                    current_text = "\n\n".join(meaningful)
 
-                    if meaningful_paragraphs:
-                        extracted_text = "\n\n".join(meaningful_paragraphs)
+                # Check for login modal error
+                is_login_wall = any(w.lower() in current_text.lower() for w in [
+                    "log in to use",
+                    "sign up or log in",
+                    "get smarter responses, upload files",
+                    "email is not valid",
+                ])
+                if is_login_wall:
+                    raise RuntimeError(
+                        "You are not logged into ChatGPT in Microsoft Edge. Please log into your ChatGPT account in the Edge browser window on your screen, then send your message again."
+                    )
 
-                # If stop button is gone and we have content, response is complete
-                if not stop_btn and len(extracted_text) > 0:
+                if current_text and current_text != full_prompt.strip():
+                    extracted_text = current_text
+                    if len(current_text) == last_text_len and len(current_text) > 0:
+                        stable_ticks += 1
+                    else:
+                        stable_ticks = 0
+                        last_text_len = len(current_text)
+
+                # Response is complete when stop button is gone AND text has stabilized
+                if not stop_btn and len(extracted_text) > 0 and stable_ticks >= 2:
                     logger.info(f"ChatGPT response streaming completed ({len(extracted_text)} chars).")
                     break
 

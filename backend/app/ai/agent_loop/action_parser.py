@@ -101,16 +101,10 @@ class ActionParser:
                 ):
                     command_actions.append(CommandAction(command=clean_cmd))
 
-        # 3. Create clean conversational prose by stripping the technical action blocks for human readability
-        clean_text = response_text
-        clean_text = file_pattern.sub(r"[Writing file: \1\3\4\5]", clean_text)
-        clean_text = run_pattern.sub(r"[Running: \1\2]", clean_text)
-        clean_text = clean_text.strip()
-
         has_actions = len(file_actions) > 0 or len(command_actions) > 0
 
         return ParsedAgentTurn(
-            clean_message=response_text if not has_actions else clean_text,
+            clean_message=response_text.strip(),
             file_actions=file_actions,
             command_actions=command_actions,
             has_actions=has_actions,
