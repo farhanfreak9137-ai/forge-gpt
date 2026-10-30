@@ -1,10 +1,11 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, FolderGit2, Terminal, ListFilter, Settings, CheckSquare } from 'lucide-react';
+import { Bot, LayoutDashboard, FolderGit2, Terminal, ListFilter, Settings, CheckSquare } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
   const links = [
-    { to: '/', label: 'Overview', icon: LayoutDashboard },
+    { to: '/', label: 'Agent Studio', icon: Bot },
+    { to: '/overview', label: 'Overview', icon: LayoutDashboard },
     { to: '/projects', label: 'Projects', icon: FolderGit2 },
     { to: '/workspace', label: 'Task Workspace', icon: Terminal },
     { to: '/activity', label: 'Activity & Logs', icon: ListFilter },

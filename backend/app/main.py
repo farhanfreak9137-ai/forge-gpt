@@ -17,6 +17,7 @@ from app.api.files import router as files_router
 from app.api.events import router as events_router
 from app.api.settings_api import router as settings_router
 from app.api.websocket import router as ws_router
+from app.api.studio import router as studio_router
 
 # Setup structured logging
 logging.basicConfig(
@@ -65,6 +66,7 @@ app.include_router(files_router, prefix=api_prefix)
 app.include_router(events_router, prefix=api_prefix)
 app.include_router(settings_router, prefix=api_prefix)
 app.include_router(ws_router, prefix=api_prefix)
+app.include_router(studio_router, prefix=api_prefix)
 
 
 @app.get("/health")

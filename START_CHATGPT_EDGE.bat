@@ -15,3 +15,4 @@ if not exist "backend\.venv\Scripts\python.exe" (
 backend\.venv\Scripts\python.exe scripts\chat_edge.py
 
 pause
+

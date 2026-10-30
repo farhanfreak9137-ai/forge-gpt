@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar } from './components/layout/Sidebar';
+import { StudioPage } from './features/studio/StudioPage';
 import { OverviewPage } from './features/dashboard/OverviewPage';
 import { ProjectsPage } from './features/projects/ProjectsPage';
 import { TaskWorkspacePage } from './features/tasks/TaskWorkspacePage';
@@ -21,7 +22,9 @@ export const App: React.FC = () => {
             <Sidebar />
             <main className="flex-1 overflow-y-auto">
               <Routes>
-                <Route path="/" element={<OverviewPage />} />
+                <Route path="/" element={<StudioPage />} />
+                <Route path="/studio" element={<StudioPage />} />
+                <Route path="/overview" element={<OverviewPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/workspace" element={<TaskWorkspacePage />} />
                 <Route path="/activity" element={<ActivityPage />} />

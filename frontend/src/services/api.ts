@@ -1,4 +1,4 @@
-import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval } from '../types';
+import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval, StudioMessage, StudioWorkspaceManifest } from '../types';
 
 const BASE_URL = '/api/v1';
 
@@ -84,6 +84,21 @@ export const api = {
     request<{ emergency_stop_active: boolean }>('/settings/emergency-stop', {
       method: 'POST',
       body: JSON.stringify({ active }),
+    }),
+
+  // Studio (Conversational AI Agent Studio)
+  sendStudioChat: (data: { message: string; workspace_path?: string; auto_pilot?: boolean; connector_name?: string }) =>
+    request<StudioMessage>('/studio/chat', { method: 'POST', body: JSON.stringify(data) }),
+  getStudioHistory: () => request<StudioMessage[]>('/studio/history'),
+  clearStudioHistory: () => request<{ status: string }>('/studio/history', { method: 'DELETE' }),
+  getStudioFiles: (workspacePath?: string) =>
+    request<StudioWorkspaceManifest>(`/studio/files${workspacePath ? `?workspace_path=${encodeURIComponent(workspacePath)}` : ''}`),
+  getStudioFileContent: (path: string, workspacePath?: string) =>
+    request<{ path: string; content: string }>(`/studio/file-content?path=${encodeURIComponent(path)}${workspacePath ? `&workspace_path=${encodeURIComponent(workspacePath)}` : ''}`),
+  saveStudioFile: (data: { file_path: string; content: string; workspace_path?: string }) =>
+    request<{ status: string; path: string; sha256: string }>('/studio/save-file', {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
 };
 

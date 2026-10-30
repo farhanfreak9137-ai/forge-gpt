@@ -156,3 +156,38 @@ export interface AppSettings {
   emergency_stop_active: boolean;
 }
 
+export interface StudioFileAction {
+  file_path: string;
+  operation: string;
+  content: string;
+}
+
+export interface StudioCommandAction {
+  command: string;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_ms?: number;
+  passed?: boolean;
+}
+
+export interface StudioMessage {
+  id: string;
+  sender: 'user' | 'assistant';
+  text: string;
+  clean_message?: string;
+  file_actions?: StudioFileAction[];
+  executed_file_changes?: Array<{ path: string; lines: number; status: string }>;
+  executed_commands?: StudioCommandAction[];
+  repair_iterations?: number;
+  timestamp: string;
+}
+
+export interface StudioWorkspaceManifest {
+  root_path: string;
+  project_name: string;
+  files: Array<{ path: string; size_bytes: number; extension: string }>;
+  total_files: number;
+  languages: string[];
+}
+
