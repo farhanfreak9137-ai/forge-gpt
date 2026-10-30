@@ -51,6 +51,33 @@ def test_action_parser_file_and_run_blocks():
     assert "Let me know if you need more features!" in parsed.clean_message
 
 
+def test_action_parser_natural_chatgpt_website_blocks():
+    """Verify parser extracts files from natural ChatGPT headers like ### 1. my-portfolio/index.html."""
+    natural_reply = (
+        "Here is the modern personal portfolio website:\n\n"
+        "### 1. `my-portfolio/index.html`\n"
+        "```html\n"
+        "<!DOCTYPE html>\n<html><head><title>Portfolio</title></head><body><h1>Hello</h1></body></html>\n"
+        "```\n\n"
+        "### 2. `my-portfolio/style.css`\n"
+        "```css\n"
+        "body { background: #0f172a; color: white; }\n"
+        "```\n\n"
+        "### 3. `my-portfolio/script.js`\n"
+        "```javascript\n"
+        "console.log('Portfolio initialized');\n"
+        "```\n"
+    )
+
+    parsed = ActionParser.parse(natural_reply)
+    assert parsed.has_actions is True
+    assert len(parsed.file_actions) == 3
+    paths = [f.file_path for f in parsed.file_actions]
+    assert "my-portfolio/index.html" in paths
+    assert "my-portfolio/style.css" in paths
+    assert "my-portfolio/script.js" in paths
+
+
 @pytest.mark.asyncio
 async def test_studio_api_full_workflow(tmp_path):
     """
@@ -104,18 +131,18 @@ async def test_studio_api_full_workflow(tmp_path):
         assert save_res.status_code == 200
         assert save_res.json()["status"] == "SAVED"
 
-        # 5. Read back file content for Monaco editor
+        # 5. Read back file content via studio API
         read_res = await client.get(
             f"/api/v1/studio/file-content?path={test_file_path}&workspace_path={tmp_path}"
         )
         assert read_res.status_code == 200
         assert read_res.json()["content"] == test_content
 
-        # 6. List workspace files for explorer
-        files_res = await client.get(f"/api/v1/studio/files?workspace_path={tmp_path}")
+        # 6. List workspace files
+        files_res = await client.get(
+            f"/api/v1/studio/files?workspace_path={tmp_path}"
+        )
         assert files_res.status_code == 200
         manifest = files_res.json()
         assert manifest["total_files"] >= 1
-        found_paths = [f["path"].replace("\\", "/") for f in manifest["files"]]
-        assert any("src/hello.py" in p for p in found_paths)
-
+        assert any(f["path"] == test_file_path for f in manifest["files"])

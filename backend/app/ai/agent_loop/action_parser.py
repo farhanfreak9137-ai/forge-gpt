@@ -54,9 +54,9 @@ class ActionParser:
     def parse(response_text: str) -> ParsedAgentTurn:
         file_actions: List[FileAction] = []
         command_actions: List[CommandAction] = []
+        seen_paths = set()
 
-        # 1. Regex to match "### file: <path>\n```<lang>\n<content>\n```"
-        # Also handles ```language file="path" or ````filename=path
+        # 1. Primary Regex: match "### file: <path>\n```<lang>\n<content>\n```" or ```lang file="path"
         file_pattern = re.compile(
             r"(?:###\s*file:\s*([^\r\n]+)\s*\r?\n```(?:[a-zA-Z0-9_-]+)?\r?\n(.*?)\r?\n```)"
             r"|(?:```[a-zA-Z0-9_-]+(?:\s+file=[\"']([^\"']+)[\"']|\s+filename=[\"']([^\"']+)[\"']|\s+:([^\r\n]+))\r?\n(.*?)\r?\n```)",
@@ -71,7 +71,6 @@ class ActionParser:
                 path = (match.group(3) or match.group(4) or match.group(5) or "").strip()
                 content = match.group(6) or ""
 
-            # Clean path and ignore templates/placeholders like <relative_path>
             cleaned_path = path.replace("\\", "/").strip().lstrip("/")
             if (
                 cleaned_path
@@ -79,8 +78,51 @@ class ActionParser:
                 and ":" not in cleaned_path
                 and "<" not in cleaned_path
                 and ">" not in cleaned_path
+                and cleaned_path not in seen_paths
             ):
+                seen_paths.add(cleaned_path)
                 file_actions.append(FileAction(file_path=cleaned_path, content=content))
+
+        # 1.5 Robust fallback scan: Detect natural ChatGPT code blocks preceded by file headers
+        # e.g.: ### 1. my-portfolio/index.html, **style.css**, or <!-- script.js -->
+        valid_exts = {
+            "html", "htm", "css", "js", "jsx", "ts", "tsx", "json",
+            "py", "md", "sh", "sql", "yaml", "yml", "txt", "bat"
+        }
+        generic_block_pattern = re.compile(
+            r"```(?:([a-zA-Z0-9_-]+)(?:\s+file=[\"']([^\"']+)[\"'])?)?\s*\r?\n(.*?)\r?\n```",
+            re.DOTALL,
+        )
+        for match in generic_block_pattern.finditer(response_text):
+            content = match.group(3) or ""
+            detected_path = None
+
+            # Check preceding lines
+            preceding = response_text[:match.start()].strip()
+            lines = preceding.splitlines()
+            for line in reversed(lines[-4:]):
+                clean_line = re.sub(r"^[#*\s\d\.\-:`'\"]+|[*\s:`'\"]+$", "", line).strip()
+                m = re.search(r"([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)", clean_line)
+                if m:
+                    cand = m.group(1).replace("\\", "/").strip().lstrip("/")
+                    ext = cand.split(".")[-1].lower()
+                    if ext in valid_exts and "<" not in cand and ">" not in cand and ".." not in cand:
+                        detected_path = cand
+                        break
+
+            # Check first line inside code block
+            if not detected_path:
+                first_line = content.strip().splitlines()[0] if content.strip() else ""
+                m = re.search(r"(?:<!--|//|/\*|#)\s*([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)", first_line)
+                if m:
+                    cand = m.group(1).replace("\\", "/").strip().lstrip("/")
+                    ext = cand.split(".")[-1].lower()
+                    if ext in valid_exts and "<" not in cand and ">" not in cand and ".." not in cand:
+                        detected_path = cand
+
+            if detected_path and detected_path not in seen_paths:
+                seen_paths.add(detected_path)
+                file_actions.append(FileAction(file_path=detected_path, content=content))
 
         # 2. Regex to match explicit "### run: <command>" or "```bash\n# run: <cmd>"
         run_pattern = re.compile(
@@ -109,4 +151,3 @@ class ActionParser:
             command_actions=command_actions,
             has_actions=has_actions,
         )
-
