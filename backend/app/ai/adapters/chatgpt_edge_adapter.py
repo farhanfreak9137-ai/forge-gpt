@@ -68,11 +68,14 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             await ta.click()
             await ta.focus()
             
-            # Format prompt for ChatGPT
-            full_prompt = (
-                f"{prompt}\n\n"
-                f"[ForgeAgent Metadata: task_id={task_id}, request_id={request_id}]"
-            )
+            # Format prompt for ChatGPT (keep studio chat clean of protocol metadata)
+            if task_id == "chat-studio":
+                full_prompt = prompt
+            else:
+                full_prompt = (
+                    f"{prompt}\n\n"
+                    f"[ForgeAgent Metadata: task_id={task_id}, request_id={request_id}]"
+                )
             await page.keyboard.type(full_prompt, delay=10)
             await page.wait_for_timeout(1000)
 
@@ -98,23 +101,35 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                     'button[aria-label="Stop streaming"], button[aria-label="Stop generating"]'
                 )
                 
-                # Extract all text from assistant turn or paragraphs
-                paragraphs = await page.query_selector_all('p')
-                # Filter out disclaimer paragraphs
-                meaningful_paragraphs = []
-                for p in paragraphs:
-                    txt = (await p.text_content() or "").strip()
-                    if txt and not any(ign in txt for ign in [
-                        "ChatGPT is AI and can make mistakes",
-                        "Log in to get answers",
-                        "Turn questions into research",
-                        "Try advanced features",
-                        "Choose an account",
-                    ]) and txt != full_prompt.strip():
-                        meaningful_paragraphs.append(txt)
+                # 1. Try to extract ONLY the latest assistant turn container
+                assistant_elements = await page.query_selector_all('[data-message-author-role="assistant"]')
+                if not assistant_elements:
+                    assistant_elements = await page.query_selector_all('article')
 
-                if meaningful_paragraphs:
-                    extracted_text = "\n\n".join(meaningful_paragraphs)
+                if assistant_elements:
+                    latest_turn = assistant_elements[-1]
+                    raw_turn_text = (await latest_turn.inner_text() or "").strip()
+                    # Exclude user's own prompt if matched
+                    if raw_turn_text and raw_turn_text != full_prompt.strip():
+                        extracted_text = raw_turn_text
+
+                # 2. Fallback to filtered paragraphs if assistant turn selector was not found
+                if not extracted_text:
+                    paragraphs = await page.query_selector_all('p')
+                    meaningful_paragraphs = []
+                    for p in paragraphs:
+                        txt = (await p.text_content() or "").strip()
+                        if txt and not any(ign in txt for ign in [
+                            "ChatGPT is AI and can make mistakes",
+                            "Log in to get answers",
+                            "Turn questions into research",
+                            "Try advanced features",
+                            "Choose an account",
+                        ]) and txt != full_prompt.strip():
+                            meaningful_paragraphs.append(txt)
+
+                    if meaningful_paragraphs:
+                        extracted_text = "\n\n".join(meaningful_paragraphs)
 
                 # If stop button is gone and we have content, response is complete
                 if not stop_btn and len(extracted_text) > 0:
@@ -145,13 +160,14 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                     logger.warning(f"Could not parse JSON payload from ChatGPT: {e}")
 
             # If natural language text response, wrap in protocol report
+            clean_reply = re.sub(r"\[ForgeAgent Metadata:[^\]]*\]", "", extracted_text).strip()
             return AIResponseEnvelope(
                 protocol_version="forgeagent.v1",
                 task_id=task_id,
                 request_id=request_id,
                 response_type=ResponseType.REPORT_ANALYSIS,
                 payload={
-                    "analysis": extracted_text,
+                    "analysis": clean_reply or extracted_text,
                     "findings": ["Received live conversational reply from ChatGPT in Microsoft Edge"],
                     "suggested_next_steps": ["Proceed with verified Edge-to-ChatGPT communication"],
                 },

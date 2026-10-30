@@ -71,14 +71,20 @@ class ActionParser:
                 path = (match.group(3) or match.group(4) or match.group(5) or "").strip()
                 content = match.group(6) or ""
 
-            # Clean path
+            # Clean path and ignore templates/placeholders like <relative_path>
             cleaned_path = path.replace("\\", "/").strip().lstrip("/")
-            if cleaned_path and ".." not in cleaned_path.split("/") and ":" not in cleaned_path:
+            if (
+                cleaned_path
+                and ".." not in cleaned_path.split("/")
+                and ":" not in cleaned_path
+                and "<" not in cleaned_path
+                and ">" not in cleaned_path
+            ):
                 file_actions.append(FileAction(file_path=cleaned_path, content=content))
 
-        # 2. Regex to match "### run: <command>" or "```bash\n# run: <cmd>"
+        # 2. Regex to match explicit "### run: <command>" or "```bash\n# run: <cmd>"
         run_pattern = re.compile(
-            r"(?:###\s*run:\s*([^\r\n]+))|(?:```(?:bash|sh|cmd|powershell)\s*\r?\n(?:#\s*run:\s*)?([^\r\n]+)\r?\n```)",
+            r"(?:###\s*run:\s*([^\r\n]+))|(?:```(?:bash|sh|cmd|powershell)\s*\r?\n#\s*run:\s*([^\r\n]+)\r?\n```)",
             re.IGNORECASE,
         )
 
@@ -86,7 +92,13 @@ class ActionParser:
             cmd = match.group(1) or match.group(2)
             if cmd:
                 clean_cmd = cmd.strip()
-                if clean_cmd and not clean_cmd.startswith("#") and clean_cmd not in [c.command for c in command_actions]:
+                if (
+                    clean_cmd
+                    and not clean_cmd.startswith("#")
+                    and "<" not in clean_cmd
+                    and ">" not in clean_cmd
+                    and clean_cmd not in [c.command for c in command_actions]
+                ):
                     command_actions.append(CommandAction(command=clean_cmd))
 
         # 3. Create clean conversational prose by stripping the technical action blocks for human readability

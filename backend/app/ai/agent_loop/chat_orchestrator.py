@@ -78,7 +78,14 @@ class ChatOrchestrator:
             payload=user_record,
         )
 
-        current_prompt = f"{SYSTEM_PROMPT_AGENT_HANDS}\nUser: {message}"
+        casual_greetings = {"hey", "hello", "hi", "how are you", "how are you?", "what's up", "whats up", "greetings", "good morning", "good evening"}
+        is_casual = message.strip().lower() in casual_greetings
+
+        if is_casual:
+            current_prompt = message
+        else:
+            current_prompt = f"{SYSTEM_PROMPT_AGENT_HANDS}\nUser: {message}"
+
         repair_iteration = 0
         executed_file_changes = []
         executed_commands = []
@@ -154,27 +161,40 @@ class ChatOrchestrator:
                     payload={"command": ca.command},
                 )
                 
-                res = await cmd_runner.run(ca.command)
-                passed = res.get("exit_code") == 0
-                cmd_record = {
-                    "command": ca.command,
-                    "exit_code": res.get("exit_code"),
-                    "stdout": res.get("stdout", ""),
-                    "stderr": res.get("stderr", ""),
-                    "duration_ms": res.get("duration_ms", 0),
-                    "passed": passed,
-                }
+                try:
+                    res = await cmd_runner.run(ca.command)
+                    passed = res.get("exit_code") == 0
+                    cmd_record = {
+                        "command": ca.command,
+                        "exit_code": res.get("exit_code"),
+                        "stdout": res.get("stdout", ""),
+                        "stderr": res.get("stderr", ""),
+                        "duration_ms": res.get("duration_ms", 0),
+                        "passed": passed,
+                    }
+                except Exception as e:
+                    logger.warning(f"Command execution error: {e}")
+                    passed = False
+                    cmd_record = {
+                        "command": ca.command,
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": f"Command error: {e}",
+                        "duration_ms": 0,
+                        "passed": False,
+                    }
+
                 executed_commands.append(cmd_record)
 
                 await event_bus.publish(
                     event_type="STUDIO_COMMAND_FINISHED",
-                    message=f"Command finished with exit code {res.get('exit_code')}: {ca.command}",
+                    message=f"Command finished with exit code {cmd_record.get('exit_code')}: {ca.command}",
                     payload=cmd_record,
                 )
 
                 if not passed:
                     has_command_failure = True
-                    last_failure_output = f"Command '{ca.command}' failed (exit code {res.get('exit_code')}):\nSTDOUT: {res.get('stdout')}\nSTDERR: {res.get('stderr')}"
+                    last_failure_output = f"Command '{ca.command}' failed:\n{cmd_record.get('stderr') or cmd_record.get('stdout')}"
 
             # 7. Check if Auto-Pilot needs to loop back to fix errors
             if auto_pilot and has_command_failure and repair_iteration < max_repair_iterations:
