@@ -69,3 +69,4 @@ def test_f_stale_hash_rejection(tmp_path):
     success, message, _ = patcher.apply_change(stale_change)
     assert success is False
     assert "Stale file error" in message
+

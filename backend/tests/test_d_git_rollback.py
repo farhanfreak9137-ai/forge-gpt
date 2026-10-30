@@ -43,3 +43,4 @@ async def test_d_git_rollback(temp_workspace: Path):
     assert code_file.read_text(encoding="utf-8") == "INITIAL_STATE = True\n"
     # Verify temporary untracked bad file was cleaned
     assert not scratch_file.exists()
+

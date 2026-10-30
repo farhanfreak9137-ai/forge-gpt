@@ -53,3 +53,4 @@ async def submit_browser_handoff_response(data: BrowserHandoffSubmitRequest):
         return {"status": "SUCCESS", "response_type": envelope.response_type.value}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+

@@ -110,3 +110,4 @@ class ContextBuilder:
             "relevant_files": collected_files,
             "error_trace": self.redact_secrets(error_trace) if error_trace else None,
         }
+

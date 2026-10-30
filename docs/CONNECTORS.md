@@ -50,3 +50,4 @@ ForgeAgent V1 supports 5 interchangeable AI providers accessed through one norma
   - Operates via Playwright with a persistent Chromium profile.
   - Detects streaming progress, waits for response completion signals, and extracts structured output.
   - Fully tested against ForgeAgent's built-in local mock chatbot (`http://127.0.0.1:8000/mock-chatbot`).
+

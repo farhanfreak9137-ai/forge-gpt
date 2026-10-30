@@ -53,3 +53,4 @@ Write-Host "`n==========================================================" -Foreg
 Write-Host " ForgeAgent V1 Setup Completed Successfully!" -ForegroundColor Green
 Write-Host " Run .\scripts\start.ps1 to launch the server and dashboard." -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
+

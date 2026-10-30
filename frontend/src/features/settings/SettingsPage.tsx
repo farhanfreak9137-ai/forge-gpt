@@ -87,6 +87,7 @@ export const SettingsPage: React.FC = () => {
                 <option value="ollama">Local Ollama Model Server</option>
                 <option value="browser_handoff">Manual Browser Handoff (Copy/Paste)</option>
                 <option value="browser_automation">Playwright Permitted Browser Automation</option>
+                <option value="chatgpt_edge">Playwright Microsoft Edge (ChatGPT Web)</option>
               </select>
             </div>
 
@@ -203,3 +204,4 @@ export const SettingsPage: React.FC = () => {
     </div>
   );
 };
+

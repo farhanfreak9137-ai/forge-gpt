@@ -53,3 +53,4 @@ async def update_settings(updates: Dict[str, Any]):
         settings.max_repair_attempts = int(updates["max_repair_attempts"])
 
     return {"status": "UPDATED"}
+

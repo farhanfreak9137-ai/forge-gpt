@@ -165,3 +165,4 @@ class BrowserHandoffSubmitRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     checkpoint_ref: str
+

@@ -65,3 +65,4 @@ async def test_a_new_project_creation(temp_workspace: Path):
     assert git_mgr.is_git_repo(), "Git repository was not initialized"
     history = await git_mgr.get_checkpoint_history()
     assert len(history) > 0, "No git checkpoints recorded"
+

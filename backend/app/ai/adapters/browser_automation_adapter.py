@@ -101,3 +101,4 @@ class BrowserAutomationAdapter(AIConnectorBase):
             raise
         finally:
             await page.close()
+

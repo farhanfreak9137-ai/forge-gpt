@@ -132,3 +132,4 @@ async def test_c_automatic_debugging(temp_workspace: Path):
 
     # Verify actual file on disk is fixed
     assert "return a + b" in (project_path / "calc.py").read_text(encoding="utf-8")
+

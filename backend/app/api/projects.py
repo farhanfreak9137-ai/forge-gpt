@@ -145,3 +145,4 @@ async def create_project_session(
     await db.commit()
     await db.refresh(session)
     return session
+

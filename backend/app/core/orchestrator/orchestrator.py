@@ -35,6 +35,7 @@ from app.ai.adapters.openai_adapter import OpenAIAdapter
 from app.ai.adapters.ollama_adapter import OllamaAdapter
 from app.ai.adapters.browser_handoff_adapter import BrowserHandoffAdapter
 from app.ai.adapters.browser_automation_adapter import BrowserAutomationAdapter
+from app.ai.adapters.chatgpt_edge_adapter import ChatGPTEdgeAdapter
 from app.ai.context.context_builder import ContextBuilder
 from app.workspace.files.file_manager import SafeFileManager
 from app.workspace.patches.patcher import PatchApplicator
@@ -62,6 +63,7 @@ class Orchestrator:
             }),
             "browser_handoff": BrowserHandoffAdapter("browser_handoff"),
             "browser_automation": BrowserAutomationAdapter("browser_automation"),
+            "chatgpt_edge": ChatGPTEdgeAdapter("chatgpt_edge"),
         }
         self.active_tasks: Dict[str, asyncio.Task] = {}
         self.pause_flags: Dict[str, bool] = {}

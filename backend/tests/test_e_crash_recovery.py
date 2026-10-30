@@ -53,3 +53,4 @@ async def test_e_crash_recovery(temp_workspace: Path):
         reconciled_task = await session.get(Task, task_id)
         assert reconciled_task.state == TaskState.PAUSED.value
         assert "server restart" in reconciled_task.error_message
+

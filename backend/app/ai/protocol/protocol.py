@@ -149,3 +149,4 @@ class AIResponseEnvelope(BaseModel):
         elif t == ResponseType.FINISH:
             return FinishPayload.model_validate(self.payload)
         raise ValueError(f"Unknown response type: {t}")
+

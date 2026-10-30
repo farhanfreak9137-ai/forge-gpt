@@ -110,3 +110,4 @@ class OpenAIAdapter(AIConnectorBase):
         except Exception as e:
             logger.error(f"OpenAI adapter request failed: {e}")
             raise
+

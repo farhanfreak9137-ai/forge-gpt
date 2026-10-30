@@ -112,3 +112,4 @@ async def test_b_existing_project_modification(temp_workspace: Path):
     # At completion, all committed to checkpoint
     history = await git_mgr.get_checkpoint_history()
     assert len(history) >= 2
+

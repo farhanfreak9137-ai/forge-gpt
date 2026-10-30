@@ -155,3 +155,4 @@ export interface AppSettings {
   max_repair_attempts: number;
   emergency_stop_active: boolean;
 }
+

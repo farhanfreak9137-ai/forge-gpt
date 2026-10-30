@@ -103,3 +103,4 @@ async def test_h_approval_enforcement(temp_workspace: Path, async_client):
 
     # Verify file remains intact after rejection
     assert target_file.exists()
+

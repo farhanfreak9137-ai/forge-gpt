@@ -54,3 +54,4 @@ def test_k_command_execution_isolation(temp_workspace: Path):
     # 4. Allowed command
     allowed, _ = runner.is_command_allowed("python --version")
     assert allowed is True
+

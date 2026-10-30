@@ -98,3 +98,4 @@ class SafeFileManager:
             target.unlink()
         elif target.is_dir():
             shutil.rmtree(target)
+

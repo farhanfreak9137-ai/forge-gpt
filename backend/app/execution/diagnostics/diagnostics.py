@@ -48,3 +48,4 @@ class DiagnosticParser:
             "error_message": error_message,
             "raw_snippet": combined[-2000:] if len(combined) > 2000 else combined,
         }
+

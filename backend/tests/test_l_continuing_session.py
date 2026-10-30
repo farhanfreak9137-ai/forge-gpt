@@ -128,3 +128,4 @@ async def test_l_continuing_development_session(temp_workspace: Path):
     calc_content = (ws / "calc.py").read_text(encoding="utf-8")
     assert "def add" in calc_content
     assert "def multiply" in calc_content
+

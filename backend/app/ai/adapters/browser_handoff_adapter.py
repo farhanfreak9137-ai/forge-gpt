@@ -98,3 +98,4 @@ class BrowserHandoffAdapter(AIConnectorBase):
         except Exception as e:
             logger.error(f"Failed to validate user pasted response: {e}")
             raise ValueError(f"Invalid forgeagent.v1 response: {e}")
+

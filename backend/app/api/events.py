@@ -18,3 +18,4 @@ async def get_activity_events(
         since_sequence=since_sequence,
         limit=limit,
     )
+

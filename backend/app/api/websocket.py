@@ -63,3 +63,4 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.warning(f"WebSocket error: {e}")
         ws_manager.disconnect(websocket)
+

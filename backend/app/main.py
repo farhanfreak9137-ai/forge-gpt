@@ -91,3 +91,4 @@ async def root():
 async def serve_mock_chatbot():
     """Serves the local mock chatbot page for automated Playwright connector tests."""
     return HTMLResponse(content=MOCK_CHATBOT_HTML)
+

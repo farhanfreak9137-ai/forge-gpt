@@ -68,3 +68,4 @@ The `SafeFileManager` enforces the following checks on every file operation:
 - **Local Loopback**: By default, the FastAPI server and WebSocket endpoints bind strictly to `127.0.0.1`.
 - **Secret Redaction**: `ContextBuilder` strips patterns matching API keys (`sk-...`, `ghp_...`, `AIza...`), tokens, and passwords from prompts before dispatch to external AI providers.
 - **Emergency Stop**: Prominent button in the dashboard and API endpoint immediately halts active operations and blocks any pending modifications.
+

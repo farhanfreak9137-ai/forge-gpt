@@ -81,3 +81,4 @@ async def test_j_openai_compatible_api_connector(monkeypatch):
     assert len(received_requests) >= 2
     chat_req = received_requests[-1]
     assert chat_req.headers.get("authorization") == "Bearer test-secret-key-12345"
+

@@ -220,3 +220,4 @@ async def rollback_task(
         raise HTTPException(status_code=400, detail="Failed to rollback git state to checkpoint")
 
     return {"status": "ROLLED_BACK", "checkpoint_ref": data.checkpoint_ref}
+

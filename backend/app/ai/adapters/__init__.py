@@ -4,6 +4,7 @@ from .openai_adapter import OpenAIAdapter
 from .ollama_adapter import OllamaAdapter
 from .browser_handoff_adapter import BrowserHandoffAdapter
 from .browser_automation_adapter import BrowserAutomationAdapter
+from .chatgpt_edge_adapter import ChatGPTEdgeAdapter
 
 __all__ = [
     "AIConnectorBase",
@@ -12,4 +13,6 @@ __all__ = [
     "OllamaAdapter",
     "BrowserHandoffAdapter",
     "BrowserAutomationAdapter",
+    "ChatGPTEdgeAdapter",
 ]
+

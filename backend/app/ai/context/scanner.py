@@ -170,3 +170,4 @@ class ProjectScanner:
             "total_files": len(files_list),
             "files": sorted(files_list, key=lambda x: x["path"]),
         }
+

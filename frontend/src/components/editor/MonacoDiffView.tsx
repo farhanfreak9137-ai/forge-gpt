@@ -36,3 +36,4 @@ export const MonacoDiffView: React.FC<MonacoDiffViewProps> = ({
     </div>
   );
 };
+

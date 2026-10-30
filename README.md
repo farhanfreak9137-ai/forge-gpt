@@ -143,3 +143,4 @@ Access the application at `http://localhost:8000`.
 - [AI Connector Configuration Guide](docs/CONNECTORS.md)
 - [Security Model & Sandboxing](docs/SECURITY.md)
 - [Acceptance Test Verification Report](docs/ACCEPTANCE_REPORT.md)
+

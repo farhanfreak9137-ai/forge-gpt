@@ -43,3 +43,4 @@ async def get_diff(
     git_mgr = GitManager(project.path)
     diff_text = await git_mgr.get_diff(commit_ref)
     return {"diff": diff_text}
+

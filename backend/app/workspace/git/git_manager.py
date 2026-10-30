@@ -122,3 +122,4 @@ class GitManager:
                     "is_forge_checkpoint": "forgeagent-checkpoint" in subject,
                 })
         return history
+

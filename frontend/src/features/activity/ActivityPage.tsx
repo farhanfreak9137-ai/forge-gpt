@@ -127,3 +127,4 @@ export const ActivityPage: React.FC = () => {
     </div>
   );
 };
+

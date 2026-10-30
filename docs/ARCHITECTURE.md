@@ -87,3 +87,4 @@ flowchart TD
 | `FAILED` | `RECOVERY_REQUIRED`, `PLANNING` | Execution halted on unrecoverable failure |
 | `CANCELLED` | _Terminal_ | Cancelled by user |
 | `RECOVERY_REQUIRED` | `CREATED`, `SCANNING`, `PAUSED`, `FAILED` | Ambiguous state requiring user review |
+

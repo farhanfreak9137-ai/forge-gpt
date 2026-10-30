@@ -96,3 +96,4 @@ class OllamaAdapter(AIConnectorBase):
         except Exception as e:
             logger.error(f"Ollama request error: {e}")
             raise RuntimeError(f"Ollama execution failed: {e}")
+

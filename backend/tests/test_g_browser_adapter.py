@@ -54,3 +54,4 @@ async def test_g_browser_adapter_with_mock_site():
             Path(mock_file_path).unlink(missing_ok=True)
         except Exception:
             pass
+

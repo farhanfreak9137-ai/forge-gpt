@@ -33,3 +33,4 @@ export const useAppStore = create<AppState>((set) => ({
   setSettings: (settings) => set({ settings }),
   setEmergencyStop: (active) => set({ isEmergencyStopActive: active }),
 }));
+

@@ -83,3 +83,4 @@ class PatchApplicator:
         except Exception as e:
             logger.error(f"Failed to apply change to {rel_path}: {e}")
             return False, str(e), None
+

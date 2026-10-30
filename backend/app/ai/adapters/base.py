@@ -41,3 +41,4 @@ class AIConnectorBase(ABC):
     async def cancel(self, request_id: str) -> bool:
         """Cancel an in-flight request if supported by provider."""
         return False
+
