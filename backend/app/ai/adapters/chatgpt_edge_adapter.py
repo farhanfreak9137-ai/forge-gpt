@@ -59,11 +59,18 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 await page.goto(self.website_url, timeout=self.timeout_ms)
                 await page.wait_for_timeout(3000)
 
-            # Locate prompt input element
-            ta_selector = 'textarea[name="prompt"], textarea#mobile-composer-prompt, textarea'
+            # Locate prompt input element (supports modern ChatGPT ProseMirror contenteditable div and classic textarea)
+            ta_selector = (
+                'div.ProseMirror, '
+                'div[contenteditable="true"], '
+                'div[role="textbox"], '
+                '#prompt-textarea, '
+                'textarea[name="prompt"], '
+                'textarea'
+            )
             ta = await page.wait_for_selector(ta_selector, timeout=20000)
             if not ta:
-                raise RuntimeError("Could not find prompt textarea on ChatGPT page")
+                raise RuntimeError("Could not find prompt input area on ChatGPT page")
 
             # Click, focus, clear existing text, and type prompt
             await ta.click()
@@ -77,11 +84,11 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
 
             # Locate and click send button or press Enter
             send_btn = await page.query_selector(
-                'button[aria-label="Send message"], button[aria-label="Send prompt"], button[data-testid="send-button"]'
+                'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]'
             )
             if send_btn and not (await send_btn.is_disabled()):
                 await send_btn.click()
-                logger.info("Clicked Send message button in Edge.")
+                logger.info("Clicked Send button in Edge.")
             else:
                 await page.keyboard.press("Enter")
                 logger.info("Pressed Enter to submit prompt in Edge.")
