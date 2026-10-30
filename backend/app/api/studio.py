@@ -46,6 +46,28 @@ async def get_chat_history():
     return chat_orchestrator.get_history()
 
 
+@router.post("/open-browser")
+async def open_edge_browser():
+    """Launch visible Microsoft Edge browser on user desktop to allow logging into ChatGPT."""
+    from app.browser.manager.browser_manager import browser_manager
+    edge_path = browser_manager.find_edge_path() or "msedge"
+    profile_dir = settings.browser_profile_dir
+    os.makedirs(profile_dir, exist_ok=True)
+
+    cmd = [
+        edge_path,
+        "--remote-debugging-port=9222",
+        f"--user-data-dir={profile_dir}",
+        "https://chatgpt.com",
+    ]
+    try:
+        import subprocess
+        subprocess.Popen(cmd)
+        return {"status": "OPENED", "message": "Microsoft Edge opened on your desktop. You may log in."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to open Microsoft Edge: {e}")
+
+
 @router.delete("/history")
 async def clear_chat_history():
     """Clear conversation history (New Chat)."""

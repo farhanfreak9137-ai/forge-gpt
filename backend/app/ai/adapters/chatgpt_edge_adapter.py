@@ -52,11 +52,12 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         context_data: Optional[Dict[str, Any]] = None,
     ) -> AIResponseEnvelope:
         logger.info(f"Opening Microsoft Edge to communicate with ChatGPT at {self.website_url}...")
-        page = await browser_manager.new_page()
+        page = await browser_manager.get_page()
 
         try:
-            await page.goto(self.website_url, timeout=self.timeout_ms)
-            await page.wait_for_timeout(3000)
+            if not page.url or "chatgpt.com" not in page.url:
+                await page.goto(self.website_url, timeout=self.timeout_ms)
+                await page.wait_for_timeout(3000)
 
             # Locate prompt input element
             ta_selector = 'textarea[name="prompt"], textarea#mobile-composer-prompt, textarea'
@@ -64,18 +65,11 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             if not ta:
                 raise RuntimeError("Could not find prompt textarea on ChatGPT page")
 
-            # Click, focus, and type prompt
+            # Click, focus, and type prompt directly as the user typed it
             await ta.click()
             await ta.focus()
             
-            # Format prompt for ChatGPT (keep studio chat clean of protocol metadata)
-            if task_id == "chat-studio":
-                full_prompt = prompt
-            else:
-                full_prompt = (
-                    f"{prompt}\n\n"
-                    f"[ForgeAgent Metadata: task_id={task_id}, request_id={request_id}]"
-                )
+            full_prompt = prompt
             await page.keyboard.type(full_prompt, delay=10)
             await page.wait_for_timeout(1000)
 
@@ -176,6 +170,4 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         except Exception as e:
             logger.error(f"ChatGPT Edge interaction failed: {e}")
             raise
-        finally:
-            await page.close()
 

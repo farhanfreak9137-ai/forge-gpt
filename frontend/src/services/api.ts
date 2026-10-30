@@ -100,5 +100,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  openStudioBrowser: () =>
+    request<{ status: string; message: string }>('/studio/open-browser', { method: 'POST' }),
 };
 

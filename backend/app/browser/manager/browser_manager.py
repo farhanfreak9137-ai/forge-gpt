@@ -44,10 +44,24 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            # Determine whether to launch Edge or fallback to Chromium
+            # 1. First, check if user already has Edge open with remote debugging (e.g. via OPEN_EDGE_CHATGPT.bat)
+            try:
+                cdp_browser = await self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9222", timeout=3000)
+                if cdp_browser.contexts:
+                    self._context = cdp_browser.contexts[0]
+                else:
+                    self._context = await cdp_browser.new_context()
+                self._is_running = True
+                logger.info("Connected to visible Microsoft Edge via CDP port 9222.")
+                return self._context
+            except Exception:
+                # Port 9222 not running, launch visible persistent context
+                pass
+
+            # 2. Launch visible persistent Edge context
             launch_kwargs = {
                 "user_data_dir": str(self.profile_dir),
-                "headless": self.headless,
+                "headless": False,  # Always visible so the user can see, interact, and log in
                 "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
@@ -58,7 +72,7 @@ class BrowserManager:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                 ],
-                "viewport": {"width": 1280, "height": 800},
+                "viewport": None,
             }
 
             edge_path = self.find_edge_path()
@@ -77,9 +91,14 @@ class BrowserManager:
             self._is_running = False
             raise
 
-    async def new_page(self) -> Page:
+    async def get_page(self) -> Page:
         context = await self.start()
+        if context.pages:
+            return context.pages[0]
         return await context.new_page()
+
+    async def new_page(self) -> Page:
+        return await self.get_page()
 
     async def close(self) -> None:
         try:

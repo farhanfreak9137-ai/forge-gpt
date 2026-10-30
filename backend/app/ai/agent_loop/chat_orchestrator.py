@@ -78,14 +78,8 @@ class ChatOrchestrator:
             payload=user_record,
         )
 
-        casual_greetings = {"hey", "hello", "hi", "how are you", "how are you?", "what's up", "whats up", "greetings", "good morning", "good evening"}
-        is_casual = message.strip().lower() in casual_greetings
-
-        if is_casual:
-            current_prompt = message
-        else:
-            current_prompt = f"{SYSTEM_PROMPT_AGENT_HANDS}\nUser: {message}"
-
+        # Send the user's exact message directly without any intrusive system prompts or metadata
+        current_prompt = message
         repair_iteration = 0
         executed_file_changes = []
         executed_commands = []

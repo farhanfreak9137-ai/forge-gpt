@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Code2,
   Sparkles,
+  ExternalLink,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StudioMessage, StudioWorkspaceManifest } from '../../types';
@@ -77,6 +78,14 @@ export const StudioPage: React.FC = () => {
       } catch (e) {
         console.error('Failed to clear history', e);
       }
+    }
+  };
+
+  const handleOpenEdge = async () => {
+    try {
+      await api.openStudioBrowser();
+    } catch (e: any) {
+      alert(`Could not launch Edge automatically: ${e.message}. You can double-click OPEN_EDGE_CHATGPT.bat in your project folder.`);
     }
   };
 
@@ -247,6 +256,16 @@ export const StudioPage: React.FC = () => {
           >
             <Zap className={`w-3.5 h-3.5 ${autoPilot ? 'text-emerald-400 fill-emerald-400' : 'text-slate-400'}`} />
             <span>Auto-Pilot: {autoPilot ? 'ON (Self-Executing)' : 'OFF (Review Only)'}</span>
+          </button>
+
+          {/* Open Edge Window for ChatGPT Login */}
+          <button
+            onClick={handleOpenEdge}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-emerald-300 hover:text-white bg-emerald-950/40 hover:bg-emerald-900/60 rounded border border-emerald-800/60 transition"
+            title="Open visible Microsoft Edge window on your screen to log into ChatGPT"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Open Edge (Log In)</span>
           </button>
 
           {/* New Chat Button */}
