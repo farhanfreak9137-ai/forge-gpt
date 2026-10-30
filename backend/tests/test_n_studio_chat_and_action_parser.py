@@ -1,5 +1,6 @@
 import pytest
 import shutil
+from unittest.mock import AsyncMock
 from pathlib import Path
 from httpx import AsyncClient, ASGITransport
 
@@ -8,6 +9,7 @@ from app.ai.agent_loop.action_parser import ActionParser
 from app.ai.agent_loop.chat_orchestrator import ChatOrchestrator, chat_orchestrator
 from app.ai.protocol.protocol import AIResponseEnvelope, ResponseType
 from app.core.orchestrator.orchestrator import orchestrator
+from app.ai.adapters.chatgpt_edge_adapter import ChatGPTEdgeAdapter
 from app.workspace.files.file_manager import SafeFileManager
 
 
@@ -87,6 +89,63 @@ def test_action_parser_chatgpt_plain_text_file_card():
     assert len(parsed.file_actions) == 1
     assert parsed.file_actions[0].file_path == "farhan.txt"
     assert parsed.file_actions[0].content == "farhan"
+
+
+def test_action_parser_unfenced_multifile_response():
+    response = (
+        "file: push-test-site/index.html\nHTML\n"
+        "<!doctype html>\n<html><body><h1>Farhan</h1></body></html>\n\n"
+        "file: push-test-site/style.css\nCSS\n"
+        "body { color: orange; }\n\n"
+        "file: push-test-site/script.js\nJavaScript\n"
+        "document.title = 'Farhan';"
+    )
+
+    parsed = ActionParser.parse(response)
+
+    assert [action.file_path for action in parsed.file_actions] == [
+        "push-test-site/index.html",
+        "push-test-site/style.css",
+        "push-test-site/script.js",
+    ]
+    assert parsed.file_actions[0].content.startswith("<!doctype html>")
+    assert parsed.file_actions[1].content == "body { color: orange; }"
+    assert parsed.file_actions[2].content == "document.title = 'Farhan';"
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_edge_waits_for_response_longer_than_old_timeout():
+    class AssistantTurn:
+        async def inner_text(self):
+            return "The complete delayed response."
+
+    class DelayedPage:
+        def __init__(self):
+            self.elapsed_ms = 0
+
+        async def query_selector_all(self, selector):
+            if self.elapsed_ms >= 305000:
+                return [AssistantTurn()]
+            return []
+
+        async def query_selector(self, selector):
+            return None
+
+        async def wait_for_timeout(self, timeout_ms):
+            self.elapsed_ms += timeout_ms
+
+    adapter = ChatGPTEdgeAdapter("chatgpt_edge", {"response_timeout_ms": 310000})
+    page = DelayedPage()
+
+    response = await adapter._wait_for_assistant_response(
+        page,
+        '[data-message-author-role="assistant"]',
+        prior_count=0,
+        prompt="Generate the website.",
+    )
+
+    assert response == "The complete delayed response."
+    assert page.elapsed_ms >= 305000
 
 
 @pytest.mark.asyncio
@@ -169,6 +228,35 @@ async def test_studio_reports_file_request_failure_after_retry(tmp_path):
         assert "file was not saved" in reply["clean_message"]
     finally:
         mock_adapter.clear_queue()
+
+
+@pytest.mark.asyncio
+async def test_studio_does_not_retry_file_request_after_connector_timeout(tmp_path, monkeypatch):
+    mock_adapter = orchestrator.get_connector("mock")
+    send_request = AsyncMock(side_effect=TimeoutError("ChatGPT generated too slowly"))
+    monkeypatch.setattr(mock_adapter, "send_request", send_request)
+
+    studio = ChatOrchestrator()
+    studio.sessions_file = tmp_path / "studio_sessions.json"
+    studio.sessions = {
+        "test-session": {
+            "id": "test-session",
+            "title": "Create farhan.txt",
+            "messages": [],
+        }
+    }
+    studio.active_session_id = "test-session"
+
+    reply = await studio.send_user_message(
+        "Create and save a txt file called farhan with farhan written in it",
+        workspace_path=str(tmp_path),
+        connector_name="mock",
+    )
+
+    assert send_request.await_count == 1
+    assert not (tmp_path / "farhan.txt").exists()
+    assert "generated too slowly" in reply["action_errors"][0]
+    assert "requested files were not saved" in reply["clean_message"]
 
 
 @pytest.mark.asyncio

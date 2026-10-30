@@ -124,16 +124,32 @@ class ActionParser:
                 seen_paths.add(detected_path)
                 file_actions.append(FileAction(file_path=detected_path, content=content))
 
-        # ChatGPT sometimes renders a plain-text code card as a filename, a
-        # "Plain text" label, and the contents, without preserving Markdown fences.
-        lines = response_text.splitlines()
-        for index, line in enumerate(lines[:-2]):
-            header_match = re.fullmatch(r"\s*(?:#{1,6}\s*)?file:\s*(.+?)\s*", line, re.IGNORECASE)
-            if not header_match:
-                continue
-
-            path = header_match.group(1).strip().strip("`\"'")
+        # ChatGPT may render file cards without Markdown fences, with a filename
+        # header followed by a language label and the raw file content.
+        file_headers = list(re.finditer(
+            r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?file:[ \t]*([^\r\n]+?)[ \t]*$",
+            response_text,
+        ))
+        language_labels = {
+            "html", "htm", "css", "javascript", "js", "typescript", "ts", "tsx",
+            "jsx", "python", "py", "plain text", "text", "json", "yaml", "yml",
+            "markdown", "md", "bash", "sh", "sql", "xml",
+        }
+        for index, header in enumerate(file_headers):
+            path = header.group(1).strip().strip("`\"'")
             cleaned_path = path.replace("\\", "/").lstrip("/")
+            content_start = header.end()
+            if response_text[content_start:content_start + 2] == "\r\n":
+                content_start += 2
+            elif response_text[content_start:content_start + 1] == "\n":
+                content_start += 1
+            content_end = file_headers[index + 1].start() if index + 1 < len(file_headers) else len(response_text)
+            content = response_text[content_start:content_end].strip("\r\n")
+            first_line, separator, remaining_content = content.partition("\n")
+            if first_line.strip().casefold() in language_labels:
+                content = remaining_content if separator else ""
+            content = content.strip("\r\n")
+
             if (
                 not cleaned_path
                 or ".." in cleaned_path.split("/")
@@ -141,11 +157,9 @@ class ActionParser:
                 or "<" in cleaned_path
                 or ">" in cleaned_path
                 or cleaned_path in seen_paths
-                or lines[index + 1].strip().casefold() != "plain text"
             ):
                 continue
 
-            content = "\n".join(lines[index + 2:]).strip("\r\n")
             if content.strip():
                 seen_paths.add(cleaned_path)
                 file_actions.append(FileAction(file_path=cleaned_path, content=content))

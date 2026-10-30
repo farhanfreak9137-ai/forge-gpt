@@ -26,6 +26,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         super().__init__(name, config)
         self.website_url = self.config.get("website_url", "https://chatgpt.com")
         self.timeout_ms = int(self.config.get("timeout_ms", 60000))
+        self.response_timeout_ms = int(self.config.get("response_timeout_ms", 600000))
 
     async def initialize(self) -> bool:
         self.is_initialized = True
@@ -42,7 +43,74 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             "website_url": self.website_url,
             "streaming_detection": True,
             "interactive": True,
+            "response_timeout_ms": self.response_timeout_ms,
         }
+
+    async def _wait_for_assistant_response(self, page, assistant_selector: str, prior_count: int, prompt: str) -> str:
+        deadline = asyncio.get_running_loop().time() + self.response_timeout_ms / 1000
+        extracted_text = ""
+        last_text = ""
+        stable_ticks = 0
+        new_turn_detected = False
+
+        logger.info(
+            "Waiting up to %.0f seconds for ChatGPT to respond and finish streaming...",
+            self.response_timeout_ms / 1000,
+        )
+
+        while asyncio.get_running_loop().time() < deadline:
+            assistant_elements = await page.query_selector_all(assistant_selector)
+            if len(assistant_elements) > prior_count:
+                new_turn = assistant_elements[-1]
+                if not new_turn_detected:
+                    logger.info("New ChatGPT assistant turn detected.")
+                    new_turn_detected = True
+
+                current_text = (await new_turn.inner_text() or "").strip()
+                is_login_wall = any(w in current_text.lower() for w in (
+                    "log in to use",
+                    "sign up or log in",
+                    "get smarter responses, upload files",
+                    "email is not valid",
+                ))
+                if is_login_wall:
+                    raise RuntimeError(
+                        "You are not logged into ChatGPT in Microsoft Edge. "
+                        "Please log into your ChatGPT account in the Edge browser window, then send your message again."
+                    )
+
+                if current_text and current_text != prompt.strip():
+                    extracted_text = current_text
+                    if current_text == last_text:
+                        stable_ticks += 1
+                    else:
+                        last_text = current_text
+                        stable_ticks = 0
+
+                    stop_button = await page.query_selector(
+                        'button[data-testid="stop-button"], '
+                        'button[aria-label="Stop generating"], '
+                        'button[aria-label="Stop streaming"]'
+                    )
+                    if not stop_button and stable_ticks >= 2:
+                        logger.info("ChatGPT response streaming completed (%s chars).", len(extracted_text))
+                        return extracted_text
+            else:
+                extracted_text = ""
+                last_text = ""
+                stable_ticks = 0
+
+            remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+            if remaining_ms > 0:
+                await page.wait_for_timeout(min(1000, remaining_ms))
+
+        if extracted_text:
+            raise TimeoutError(
+                f"ChatGPT response did not finish within {self.response_timeout_ms / 1000:.0f} seconds."
+            )
+        raise TimeoutError(
+            f"ChatGPT did not produce a new assistant response within {self.response_timeout_ms / 1000:.0f} seconds."
+        )
 
     async def _get_page_with_recovery(self):
         """Get a browser page, forcing a full browser restart if the first attempt fails."""
@@ -122,74 +190,13 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 await page.keyboard.press("Enter")
                 logger.info("Pressed Enter to submit prompt in Edge.")
 
-            # 4. Wait for the NEW assistant message container to appear
-            logger.info("Waiting for new assistant turn to appear in Edge...")
-            new_turn = None
-            for _ in range(25):  # wait up to 12.5 seconds for new turn to spawn
-                await page.wait_for_timeout(500)
-                current_assistant_elements = await page.query_selector_all(assistant_selector)
-                if len(current_assistant_elements) > prior_count:
-                    new_turn = current_assistant_elements[-1]
-                    logger.info(f"New assistant turn detected (turn #{len(current_assistant_elements)}).")
-                    break
-
-            if not new_turn:
-                current_assistant_elements = await page.query_selector_all(assistant_selector)
-                if current_assistant_elements:
-                    new_turn = current_assistant_elements[-1]
-
-            # 5. Wait for ChatGPT to FINISH streaming the full response
-            logger.info("Waiting for ChatGPT to finish generating response...")
-            extracted_text = ""
-            last_text_len = 0
-            stable_ticks = 0
-
-            for _ in range(60):  # poll up to ~60 seconds
-                await page.wait_for_timeout(1000)
-
-                # Check if stop generating button is still active
-                stop_btn = await page.query_selector(
-                    'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
-                )
-
-                # Extract text from the new turn or last assistant element
-                if new_turn:
-                    current_text = (await new_turn.inner_text() or "").strip()
-                else:
-                    current_assistant_elements = await page.query_selector_all(assistant_selector)
-                    if current_assistant_elements:
-                        current_text = (await current_assistant_elements[-1].inner_text() or "").strip()
-                    else:
-                        current_text = ""
-
-                # Check for login modal / guest session wall
-                is_login_wall = any(w.lower() in current_text.lower() for w in [
-                    "log in to use",
-                    "sign up or log in",
-                    "get smarter responses, upload files",
-                    "email is not valid",
-                ])
-                if is_login_wall:
-                    raise RuntimeError(
-                        "You are not logged into ChatGPT in Microsoft Edge. "
-                        "Please log into your ChatGPT account in the Edge browser window, then send your message again."
-                    )
-
-                if current_text and current_text != full_prompt.strip():
-                    extracted_text = current_text
-                    if len(current_text) == last_text_len and len(current_text) > 0:
-                        stable_ticks += 1
-                    else:
-                        stable_ticks = 0
-                        last_text_len = len(current_text)
-
-                # Response is complete when stop button is gone AND text has been stable for 2 ticks
-                if not stop_btn and len(extracted_text) > 0 and stable_ticks >= 2:
-                    logger.info(f"ChatGPT response streaming completed ({len(extracted_text)} chars).")
-                    break
-
-            if not extracted_text:
-                raise TimeoutError("ChatGPT did not produce a response within the timeout limit.")
+            # 4. Wait for a new assistant turn and its complete response.
+            extracted_text = await self._wait_for_assistant_response(
+                page,
+                assistant_selector,
+                prior_count,
+                full_prompt,
+            )
 
             logger.info(f"Extracted reply from ChatGPT: {extracted_text[:200]}...")
 

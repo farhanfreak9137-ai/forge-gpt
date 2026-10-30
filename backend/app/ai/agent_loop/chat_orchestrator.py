@@ -282,6 +282,7 @@ class ChatOrchestrator:
             # 2. Query ChatGPT
             logger.info(f"Querying AI ({connector.name}) with prompt (length: {len(current_prompt)})...")
             req_id = f"chat-{uuid.uuid4().hex[:8]}"
+            connector_error = None
 
             try:
                 envelope = await connector.send_request(
@@ -300,6 +301,7 @@ class ChatOrchestrator:
 
             except Exception as e:
                 logger.error(f"Error communicating with AI connector: {e}")
+                connector_error = str(e)
                 # If this looks like a browser/Playwright crash, reset state so the next
                 # request gets a fresh browser context instead of reusing a dead one.
                 err_str = str(e).lower()
@@ -315,6 +317,13 @@ class ChatOrchestrator:
             # 3. Parse actions vs conversational text
             parsed = ActionParser.parse(raw_reply)
             final_reply_text = raw_reply
+
+            if connector_error:
+                if expects_file_output:
+                    action_errors.append(
+                        f"AI connector failed; requested files were not saved: {connector_error}"
+                    )
+                break
 
             if expects_file_output and not parsed.file_actions:
                 if file_action_retry_count < 1:
