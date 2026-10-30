@@ -1,9 +1,12 @@
 import os
+import time
 import shutil
 import logging
-from typing import Optional
+import subprocess
+import urllib.request
+from typing import Optional, List, Dict, Any
 from pathlib import Path
-from playwright.async_api import async_playwright, Playwright, BrowserContext, Page, Browser
+from playwright.async_api import async_playwright, Playwright, BrowserContext, Page
 from app.config.settings import settings
 
 logger = logging.getLogger("forgeagent.browser.manager")
@@ -36,32 +39,86 @@ class BrowserManager:
                 return c
         return None
 
+    def focus_edge_window(self) -> None:
+        """Brings the Microsoft Edge / ChatGPT window to the front of Windows desktop."""
+        try:
+            ps_script = (
+                '$w = New-Object -ComObject WScript.Shell; '
+                'if (-not $w.AppActivate("ChatGPT")) { $w.AppActivate("Edge") }'
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                timeout=3,
+                capture_output=True,
+            )
+        except Exception:
+            pass
+
+    def ensure_edge_running(self) -> bool:
+        """Verifies if Edge CDP is running; if not, launches visible Edge desktop process."""
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=1):
+                self.focus_edge_window()
+                return True
+        except Exception:
+            pass
+
+        edge_path = self.find_edge_path() or "msedge"
+        profile_dir = self.profile_dir
+        os.makedirs(profile_dir, exist_ok=True)
+        cmd = [
+            edge_path,
+            "--remote-debugging-port=9222",
+            f"--user-data-dir={profile_dir}",
+            "--start-maximized",
+            "--new-window",
+            "https://chatgpt.com",
+        ]
+        try:
+            logger.info(f"Launching visible Microsoft Edge on desktop: {cmd}")
+            subprocess.Popen(cmd)
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=1):
+                        logger.info("Microsoft Edge CDP port 9222 is active.")
+                        self.focus_edge_window()
+                        return True
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Failed to launch Microsoft Edge desktop process: {e}")
+        return False
+
     async def start(self) -> BrowserContext:
         if self._is_running and self._context:
             return self._context
 
         os.makedirs(self.profile_dir, exist_ok=True)
-        try:
-            self._playwright = await async_playwright().start()
+        self.ensure_edge_running()
 
-            # 1. First, check if user already has Edge open with remote debugging (e.g. via OPEN_EDGE_CHATGPT.bat)
+        try:
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+
+            # 1. First, connect over CDP to visible Edge
             try:
-                cdp_browser = await self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9222", timeout=3000)
+                cdp_browser = await self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9222", timeout=5000)
                 if cdp_browser.contexts:
                     self._context = cdp_browser.contexts[0]
                 else:
                     self._context = await cdp_browser.new_context()
                 self._is_running = True
+                self.focus_edge_window()
                 logger.info("Connected to visible Microsoft Edge via CDP port 9222.")
                 return self._context
-            except Exception:
-                # Port 9222 not running, launch visible persistent context
-                pass
+            except Exception as cdp_err:
+                logger.warning(f"CDP connect failed, launching persistent context fallback: {cdp_err}")
 
-            # 2. Launch visible persistent Edge context
+            # 2. Launch persistent Edge context fallback
             launch_kwargs = {
                 "user_data_dir": str(self.profile_dir),
-                "headless": False,  # Always visible so the user can see, interact, and log in
+                "headless": False,
                 "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
@@ -80,12 +137,10 @@ class BrowserManager:
             edge_path = self.find_edge_path()
             if self.browser_channel == "msedge" and edge_path:
                 launch_kwargs["channel"] = "msedge"
-                logger.info(f"Launching Microsoft Edge browser via channel 'msedge' ({edge_path})")
-            else:
-                logger.info("Launching standard Chromium browser context")
 
             self._context = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
             self._is_running = True
+            self.focus_edge_window()
             logger.info("Persistent browser context started successfully.")
             return self._context
         except Exception as e:
@@ -95,12 +150,109 @@ class BrowserManager:
 
     async def get_page(self) -> Page:
         context = await self.start()
+        self.focus_edge_window()
+        # Find ChatGPT page if one already exists
+        for p in context.pages:
+            if "chatgpt.com" in p.url:
+                await p.bring_to_front()
+                return p
         if context.pages:
-            return context.pages[0]
-        return await context.new_page()
+            p = context.pages[0]
+            await p.bring_to_front()
+            return p
+        new_page = await context.new_page()
+        await new_page.bring_to_front()
+        return new_page
 
     async def new_page(self) -> Page:
         return await self.get_page()
+
+    async def navigate_to_chat(self, url: str) -> Page:
+        """Navigates Edge to a specific ChatGPT conversation or new chat and brings it forward."""
+        page = await self.get_page()
+        self.focus_edge_window()
+        await page.bring_to_front()
+        if page.url != url:
+            await page.goto(url, timeout=30000)
+            await page.wait_for_timeout(1000)
+        return page
+
+    async def get_chatgpt_conversations(self) -> List[Dict[str, str]]:
+        """Scrapes ChatGPT's sidebar conversation threads."""
+        try:
+            page = await self.get_page()
+            if not page.url or "chatgpt.com" not in page.url:
+                return []
+            items = await page.evaluate("""() => {
+                const list = [];
+                const seen = new Set();
+                document.querySelectorAll('a[href*="/c/"]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const m = href.match(/\\/c\\/([a-zA-Z0-9-]+)/);
+                    if (m) {
+                        const id = m[1];
+                        if (!seen.has(id)) {
+                            seen.add(id);
+                            const title = (a.innerText || '').trim().replace(/\\n+/g, ' ');
+                            if (title) {
+                                list.push({ id: id, title: title, href: href });
+                            }
+                        }
+                    }
+                });
+                return list;
+            }""")
+            return items
+        except Exception as e:
+            logger.warning(f"Could not retrieve ChatGPT conversations from page: {e}")
+            return []
+
+    async def get_current_chat_messages(self) -> List[Dict[str, Any]]:
+        """Extracts turn history from current ChatGPT page."""
+        try:
+            page = await self.get_page()
+            turns = await page.evaluate("""() => {
+                const results = [];
+                const turnElements = document.querySelectorAll('[data-turn-key]');
+                turnElements.forEach((t, idx) => {
+                    let userText = '';
+                    const userEl = t.querySelector('.whitespace-pre-wrap, [class*="user-bubble"], [data-message-author-role="user"]');
+                    if (userEl) {
+                        userText = userEl.innerText.trim();
+                    } else {
+                        const m = t.innerText.match(/You said:\\s*You([\\s\\S]*?)ChatGPT said:/);
+                        if (m) userText = m[1].trim();
+                    }
+                    if (userText) {
+                        results.push({
+                            id: `u-${idx}`,
+                            sender: 'user',
+                            text: userText,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                    
+                    let assistantText = '';
+                    const assistantEl = t.querySelector('[class*="DilResponseRoot"], [class*="ResponseRoot"], [data-message-author-role="assistant"]');
+                    if (assistantEl) {
+                        assistantText = assistantEl.innerText.trim();
+                    }
+                    if (assistantText) {
+                        results.push({
+                            id: `a-${idx}`,
+                            sender: 'assistant',
+                            text: assistantText,
+                            clean_message: assistantText,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                });
+                return results;
+            }""")
+            return turns
+        except Exception as e:
+            logger.warning(f"Could not extract messages from page: {e}")
+            return []
 
     async def close(self) -> None:
         try:

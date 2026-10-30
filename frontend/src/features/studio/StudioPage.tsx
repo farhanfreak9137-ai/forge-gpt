@@ -19,9 +19,15 @@ import {
   ExternalLink,
   Copy,
   Check,
+  MessageSquare,
+  Plus,
+  Trash2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
 } from 'lucide-react';
 import { api } from '../../services/api';
-import { StudioMessage, StudioWorkspaceManifest } from '../../types';
+import { StudioMessage, StudioWorkspaceManifest, StudioChatSession } from '../../types';
 import { MonacoEditorView } from '../../components/editor/MonacoEditorView';
 
 export const StudioPage: React.FC = () => {
@@ -33,6 +39,13 @@ export const StudioPage: React.FC = () => {
   const [connectorName, setConnectorName] = useState('chatgpt_edge');
   const [activeTab, setActiveTab] = useState<'editor' | 'files' | 'terminal'>('editor');
   
+  // Session / Chat History State
+  const [sessions, setSessions] = useState<StudioChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [sessionSearch, setSessionSearch] = useState('');
+  const [isSyncingSessions, setIsSyncingSessions] = useState(false);
+
   // Workspace & Editor state
   const [manifest, setManifest] = useState<StudioWorkspaceManifest | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -49,6 +62,66 @@ export const StudioPage: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const loadSessions = async (sync = true) => {
+    setIsSyncingSessions(true);
+    try {
+      const data = await api.getStudioSessions(sync);
+      setSessions(data);
+      const active = data.find((s) => s.is_active);
+      if (active) {
+        setActiveSessionId(active.id);
+      } else if (data.length > 0 && !activeSessionId) {
+        setActiveSessionId(data[0].id);
+      }
+    } catch (e) {
+      console.error('Failed to load sessions', e);
+    } finally {
+      setIsSyncingSessions(false);
+    }
+  };
+
+  const handleSelectSession = async (sessionId: string) => {
+    try {
+      setActiveSessionId(sessionId);
+      const session = await api.selectStudioSession(sessionId);
+      setMessages(session.messages || []);
+      setSessions((prev) =>
+        prev.map((s) => ({ ...s, is_active: s.id === sessionId }))
+      );
+    } catch (e) {
+      console.error('Failed to select session', e);
+    }
+  };
+
+  const handleCreateNewSession = async () => {
+    try {
+      const newSession = await api.createStudioSession('New Chat');
+      setMessages([]);
+      setActiveSessionId(newSession.id);
+      await loadSessions(false);
+    } catch (e) {
+      console.error('Failed to create new session', e);
+    }
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation();
+    try {
+      await api.deleteStudioSession(sessionId);
+      if (sessionId === activeSessionId) {
+        const remaining = sessions.filter((s) => s.id !== sessionId);
+        if (remaining.length > 0) {
+          await handleSelectSession(remaining[0].id);
+        } else {
+          await handleCreateNewSession();
+        }
+      }
+      await loadSessions(false);
+    } catch (e) {
+      console.error('Failed to delete session', e);
+    }
   };
 
   const renderMessageContent = (content: string) => {
@@ -100,8 +173,9 @@ export const StudioPage: React.FC = () => {
     });
   };
 
-  // Load chat history & workspace files on mount
+  // Load chat history, sessions & workspace files on mount
   useEffect(() => {
+    loadSessions(true);
     loadChatHistory();
     loadWorkspaceFiles();
   }, []);
@@ -129,14 +203,7 @@ export const StudioPage: React.FC = () => {
   };
 
   const handleClearHistory = async () => {
-    if (confirm('Clear chat history and start a fresh session?')) {
-      try {
-        await api.clearStudioHistory();
-        setMessages([]);
-      } catch (e) {
-        console.error('Failed to clear history', e);
-      }
-    }
+    await handleCreateNewSession();
   };
 
   const handleOpenEdge = async () => {
@@ -172,6 +239,7 @@ export const StudioPage: React.FC = () => {
 
       // Replace or append
       setMessages((prev) => [...prev.filter((m) => m.id !== tempUserMsg.id), tempUserMsg, assistantReply]);
+      await loadSessions(false);
 
       // If files were modified, refresh file list and open the last modified file
       if (assistantReply.executed_file_changes && assistantReply.executed_file_changes.length > 0) {
@@ -270,6 +338,11 @@ export const StudioPage: React.FC = () => {
     'Run tests with pytest to check current workspace health',
   ];
 
+  const filteredSessions = sessions.filter((s) =>
+    (s.title || '').toLowerCase().includes(sessionSearch.toLowerCase())
+  );
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+
   return (
     <div className="flex flex-col h-full bg-slate-950 text-slate-100 overflow-hidden">
       {/* Top Studio Toolbar */}
@@ -340,8 +413,121 @@ export const StudioPage: React.FC = () => {
 
       {/* Main Split Layout: Left Chat & Right IDE/Editor */}
       <div className="flex flex-1 overflow-hidden">
+        {/* CHAT HISTORY SIDEBAR (ChatGPT Style) */}
+        <aside
+          className={`transition-all duration-300 border-r border-slate-800 bg-slate-950/90 flex flex-col shrink-0 overflow-hidden ${
+            isSidebarOpen ? 'w-64' : 'w-0'
+          }`}
+        >
+          {/* Sidebar Top: New Chat & Refresh */}
+          <div className="p-3 border-b border-slate-800 flex items-center gap-2">
+            <button
+              onClick={handleCreateNewSession}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 transition shadow-sm"
+              title="Start a new chat thread"
+            >
+              <Plus className="w-3.5 h-3.5 text-emerald-400" />
+              <span>New Chat</span>
+            </button>
+            <button
+              onClick={() => loadSessions(true)}
+              disabled={isSyncingSessions}
+              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
+              title="Sync conversations with Microsoft Edge / ChatGPT"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSessions ? 'animate-spin text-emerald-400' : ''}`} />
+            </button>
+          </div>
+
+          {/* Search Bar */}
+          <div className="px-3 pt-2.5 pb-1">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search chats..."
+                value={sessionSearch}
+                onChange={(e) => setSessionSearch(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-800 rounded-md pl-8 pr-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+          </div>
+
+          {/* Conversations List */}
+          <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+            <div className="px-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center justify-between">
+              <span>Saved Conversations</span>
+              <span className="text-[10px] font-normal text-slate-500">{filteredSessions.length}</span>
+            </div>
+
+            {filteredSessions.length === 0 ? (
+              <div className="text-center py-8 text-xs text-slate-600">
+                {sessionSearch ? 'No matching chats' : 'No chats found'}
+              </div>
+            ) : (
+              filteredSessions.map((s) => {
+                const isActive = s.id === activeSessionId;
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => handleSelectSession(s.id)}
+                    className={`group relative flex items-center justify-between px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-all ${
+                      isActive
+                        ? 'bg-slate-800/95 text-white font-medium border border-slate-700 shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0 pr-1">
+                      <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-emerald-400' : 'text-slate-500 group-hover:text-slate-300'}`} />
+                      <span className="truncate">{s.title || 'Untitled Chat'}</span>
+                    </div>
+
+                    <button
+                      onClick={(e) => handleDeleteSession(e, s.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-rose-400 rounded hover:bg-slate-700/60 transition shrink-0"
+                      title="Delete conversation"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
         {/* LEFT PANEL: Chat with Brain & Agent Hands */}
-        <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950/60 overflow-hidden">
+        <div className="flex-1 flex flex-col border-r border-slate-800 bg-slate-950/60 overflow-hidden min-w-[340px]">
+          {/* Chat Header with Active Thread Name & Collapse Toggle */}
+          <div className="h-10 px-3 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between text-xs text-slate-400 shrink-0">
+            <div className="flex items-center gap-2 overflow-hidden">
+              <button
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                className="p-1 hover:text-white rounded hover:bg-slate-800 transition"
+                title={isSidebarOpen ? "Collapse sidebar" : "Show chat history"}
+              >
+                {isSidebarOpen ? <PanelLeftClose className="w-4 h-4 text-slate-400" /> : <PanelLeftOpen className="w-4 h-4 text-emerald-400" />}
+              </button>
+              <span className="font-semibold text-slate-200 truncate max-w-xs">
+                {activeSession?.title || 'Chat'}
+              </span>
+              {activeSession?.chatgpt_id && (
+                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 shrink-0">
+                  ChatGPT Synced
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCreateNewSession}
+                className="flex items-center gap-1 px-2 py-1 text-[11px] rounded bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
+                title="Start a new chat"
+              >
+                <Plus className="w-3 h-3 text-emerald-400" />
+                <span>New Chat</span>
+              </button>
+            </div>
+          </div>
           {/* Chat Messages Scrollable */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 ? (
@@ -584,7 +770,7 @@ export const StudioPage: React.FC = () => {
         </div>
 
         {/* RIGHT PANEL: Workspace IDE & Monaco Editor */}
-        <div className="w-1/2 flex flex-col bg-slate-950 overflow-hidden">
+        <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden min-w-[380px]">
           {/* Right Panel Tabs Header */}
           <div className="h-10 border-b border-slate-800 bg-slate-900/60 px-3 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-1">

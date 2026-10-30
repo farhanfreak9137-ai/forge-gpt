@@ -53,11 +53,16 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
     ) -> AIResponseEnvelope:
         logger.info(f"Opening Microsoft Edge to communicate with ChatGPT at {self.website_url}...")
         page = await browser_manager.get_page()
+        browser_manager.focus_edge_window()
+        await page.bring_to_front()
 
         try:
             if not page.url or "chatgpt.com" not in page.url:
                 await page.goto(self.website_url, timeout=self.timeout_ms)
                 await page.wait_for_timeout(3000)
+            
+            browser_manager.focus_edge_window()
+            await page.bring_to_front()
 
             # Locate prompt input element (supports modern ChatGPT ProseMirror contenteditable div and classic textarea)
             ta_selector = (

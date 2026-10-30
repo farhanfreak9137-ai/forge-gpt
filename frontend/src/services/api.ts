@@ -1,4 +1,4 @@
-import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval, StudioMessage, StudioWorkspaceManifest } from '../types';
+import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval, StudioMessage, StudioWorkspaceManifest, StudioChatSession } from '../types';
 
 const BASE_URL = '/api/v1';
 
@@ -87,6 +87,16 @@ export const api = {
     }),
 
   // Studio (Conversational AI Agent Studio)
+  getStudioSessions: (sync = true) =>
+    request<StudioChatSession[]>(`/studio/sessions?sync=${sync}`),
+  createStudioSession: (title = 'New Chat') =>
+    request<StudioChatSession>('/studio/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
+  getStudioSession: (sessionId: string) =>
+    request<any>(`/studio/sessions/${sessionId}`),
+  selectStudioSession: (sessionId: string) =>
+    request<any>(`/studio/sessions/${sessionId}/select`, { method: 'POST' }),
+  deleteStudioSession: (sessionId: string) =>
+    request<{ status: string; session_id: string }>(`/studio/sessions/${sessionId}`, { method: 'DELETE' }),
   sendStudioChat: (data: { message: string; workspace_path?: string; auto_pilot?: boolean; connector_name?: string }) =>
     request<StudioMessage>('/studio/chat', { method: 'POST', body: JSON.stringify(data) }),
   getStudioHistory: () => request<StudioMessage[]>('/studio/history'),

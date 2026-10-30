@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -20,25 +21,182 @@ from app.ai.agent_loop.action_parser import (
 logger = logging.getLogger("forgeagent.ai.chat_orchestrator")
 
 
-class ChatMessage(Dict[str, Any]):
-    pass
-
-
 class ChatOrchestrator:
     """
     Manages conversational pair-programming sessions with ChatGPT Web / external AI.
-    Handles natural language chatting, file writes, command executions, and autonomous repair loops.
+    Handles natural language chatting, file writes, command executions, session persistence,
+    and automatic synchronization with ChatGPT conversation history.
     """
 
     def __init__(self):
-        self.conversation_history: List[Dict[str, Any]] = []
+        self.sessions_file = settings.data_dir / "studio_sessions.json"
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.active_session_id: Optional[str] = None
         self._lock = asyncio.Lock()
+        self._load_sessions()
+
+    def _load_sessions(self):
+        try:
+            if self.sessions_file.exists():
+                with open(self.sessions_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.sessions = data.get("sessions", {})
+                    self.active_session_id = data.get("active_session_id")
+        except Exception as e:
+            logger.warning(f"Failed to load studio sessions: {e}")
+            self.sessions = {}
+
+        if not self.sessions:
+            new_id = f"session-{uuid.uuid4().hex[:8]}"
+            self.sessions[new_id] = {
+                "id": new_id,
+                "title": "New Chat",
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+                "messages": [],
+                "chatgpt_id": None,
+            }
+            self.active_session_id = new_id
+
+        if not self.active_session_id or self.active_session_id not in self.sessions:
+            self.active_session_id = list(self.sessions.keys())[0]
+
+    def _save_sessions(self):
+        try:
+            self.sessions_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.sessions_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "sessions": self.sessions,
+                    "active_session_id": self.active_session_id
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save studio sessions: {e}")
+
+    def get_active_session(self) -> Dict[str, Any]:
+        if not self.active_session_id or self.active_session_id not in self.sessions:
+            if self.sessions:
+                self.active_session_id = list(self.sessions.keys())[0]
+            else:
+                new_id = f"session-{uuid.uuid4().hex[:8]}"
+                self.sessions[new_id] = {
+                    "id": new_id,
+                    "title": "New Chat",
+                    "created_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "messages": [],
+                    "chatgpt_id": None,
+                }
+                self.active_session_id = new_id
+                self._save_sessions()
+        return self.sessions[self.active_session_id]
+
+    async def list_sessions(self, sync_chatgpt: bool = True) -> List[Dict[str, Any]]:
+        """Returns all sessions, synchronizing with ChatGPT's saved threads if available."""
+        if sync_chatgpt:
+            try:
+                from app.browser.manager.browser_manager import browser_manager
+                chatgpt_chats = await browser_manager.get_chatgpt_conversations()
+                for c in chatgpt_chats:
+                    cid = c["id"]
+                    # If not already present, create a session entry for it
+                    if cid not in self.sessions and not any(s.get("chatgpt_id") == cid for s in self.sessions.values()):
+                        self.sessions[cid] = {
+                            "id": cid,
+                            "title": c["title"],
+                            "created_at": datetime.utcnow().isoformat(),
+                            "updated_at": datetime.utcnow().isoformat(),
+                            "messages": [],
+                            "chatgpt_id": cid,
+                        }
+                self._save_sessions()
+            except Exception as e:
+                logger.debug(f"Syncing ChatGPT conversations skipped: {e}")
+
+        # Return list sorted by updated_at descending
+        sorted_list = sorted(
+            self.sessions.values(),
+            key=lambda s: s.get("updated_at", ""),
+            reverse=True,
+        )
+        return [
+            {
+                "id": s["id"],
+                "title": s.get("title", "Conversation"),
+                "created_at": s.get("created_at"),
+                "updated_at": s.get("updated_at"),
+                "message_count": len(s.get("messages", [])),
+                "is_active": s["id"] == self.active_session_id,
+                "chatgpt_id": s.get("chatgpt_id"),
+            }
+            for s in sorted_list
+        ]
+
+    async def create_session(self, title: str = "New Chat") -> Dict[str, Any]:
+        new_id = f"session-{uuid.uuid4().hex[:8]}"
+        session = {
+            "id": new_id,
+            "title": title,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "messages": [],
+            "chatgpt_id": None,
+        }
+        self.sessions[new_id] = session
+        self.active_session_id = new_id
+        self._save_sessions()
+
+        # In Edge, navigate to clean new chat
+        try:
+            from app.browser.manager.browser_manager import browser_manager
+            await browser_manager.navigate_to_chat("https://chatgpt.com/")
+        except Exception:
+            pass
+
+        return session
+
+    async def select_session(self, session_id: str) -> Dict[str, Any]:
+        if session_id not in self.sessions:
+            raise KeyError(f"Session {session_id} not found")
+        self.active_session_id = session_id
+        session = self.sessions[session_id]
+
+        # If it has a chatgpt_id, navigate Edge to it
+        chatgpt_id = session.get("chatgpt_id") or (session_id if len(session_id) > 20 else None)
+        if chatgpt_id:
+            try:
+                from app.browser.manager.browser_manager import browser_manager
+                await browser_manager.navigate_to_chat(f"https://chatgpt.com/c/{chatgpt_id}")
+                # If session has no messages yet, extract from page
+                if not session.get("messages"):
+                    turns = await browser_manager.get_current_chat_messages()
+                    if turns:
+                        session["messages"] = turns
+                        self._save_sessions()
+            except Exception as e:
+                logger.warning(f"Failed to navigate Edge to chat {chatgpt_id}: {e}")
+
+        self._save_sessions()
+        return session
+
+    def delete_session(self, session_id: str) -> None:
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            if self.active_session_id == session_id:
+                if self.sessions:
+                    self.active_session_id = list(self.sessions.keys())[0]
+                else:
+                    self.active_session_id = None
+            self._save_sessions()
 
     def get_history(self) -> List[Dict[str, Any]]:
-        return list(self.conversation_history)
+        active = self.get_active_session()
+        return list(active.get("messages", []))
 
     def clear_history(self) -> None:
-        self.conversation_history.clear()
+        active = self.get_active_session()
+        active["messages"] = []
+        active["updated_at"] = datetime.utcnow().isoformat()
+        self._save_sessions()
 
     async def send_user_message(
         self,
@@ -61,6 +219,12 @@ class ChatOrchestrator:
         git_mgr = GitManager(str(ws_path))
         cmd_runner = SafeCommandRunner(str(ws_path))
 
+        active_sess = self.get_active_session()
+
+        # If this is the first message in a newly created chat, auto-update the title
+        if active_sess.get("title") in ("New Chat", "Untitled", None, ""):
+            active_sess["title"] = message[:35].strip()
+
         user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
 
@@ -71,7 +235,10 @@ class ChatOrchestrator:
             "text": message,
             "timestamp": datetime.utcnow().isoformat(),
         }
-        self.conversation_history.append(user_record)
+        active_sess.setdefault("messages", []).append(user_record)
+        active_sess["updated_at"] = datetime.utcnow().isoformat()
+        self._save_sessions()
+
         await event_bus.publish(
             event_type="CHAT_MESSAGE_SENT",
             message=message,
@@ -219,7 +386,9 @@ class ChatOrchestrator:
             "repair_iterations": repair_iteration,
             "timestamp": datetime.utcnow().isoformat(),
         }
-        self.conversation_history.append(assistant_record)
+        active_sess.setdefault("messages", []).append(assistant_record)
+        active_sess["updated_at"] = datetime.utcnow().isoformat()
+        self._save_sessions()
 
         await event_bus.publish(
             event_type="CHAT_MESSAGE_RECEIVED",
@@ -231,4 +400,3 @@ class ChatOrchestrator:
 
 
 chat_orchestrator = ChatOrchestrator()
-

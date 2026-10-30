@@ -191,3 +191,13 @@ export interface StudioWorkspaceManifest {
   languages: string[];
 }
 
+export interface StudioChatSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  is_active: boolean;
+  chatgpt_id?: string | null;
+}
+

@@ -25,6 +25,50 @@ class SaveFileRequest(BaseModel):
     workspace_path: Optional[str] = None
 
 
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = "New Chat"
+
+
+@router.get("/sessions")
+async def list_chat_sessions(sync: bool = True):
+    """Retrieve all chat sessions, syncing with logged-in ChatGPT in Edge."""
+    return await chat_orchestrator.list_sessions(sync_chatgpt=sync)
+
+
+@router.post("/sessions")
+async def create_chat_session(data: Optional[CreateSessionRequest] = None):
+    """Create a new chat session (and navigates Edge to fresh chat)."""
+    title = data.title if data and data.title else "New Chat"
+    return await chat_orchestrator.create_session(title=title)
+
+
+@router.get("/sessions/{session_id}")
+async def get_chat_session(session_id: str):
+    """Get a specific chat session with its messages."""
+    if session_id not in chat_orchestrator.sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return chat_orchestrator.sessions[session_id]
+
+
+@router.post("/sessions/{session_id}/select")
+async def select_chat_session(session_id: str):
+    """Activate and switch to a chat session (switches ChatGPT tab in Edge)."""
+    try:
+        session = await chat_orchestrator.select_session(session_id)
+        return session
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_chat_session(session_id: str):
+    """Delete a chat session."""
+    chat_orchestrator.delete_session(session_id)
+    return {"status": "DELETED", "session_id": session_id}
+
+
 @router.post("/chat")
 async def chat_with_agent(data: ChatRequest):
     """Send natural language message to the agent / ChatGPT and auto-execute code/commands."""
