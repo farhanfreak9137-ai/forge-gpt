@@ -21,3 +21,4 @@ if (-not (Test-Path $PythonExe)) {
 }
 
 & $PythonExe "$RootPath\scripts\chat_edge.py" @args
+

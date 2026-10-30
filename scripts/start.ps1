@@ -24,6 +24,8 @@ Start-Sleep -Seconds 2
 
 # 2. Start Frontend
 Write-Host "`n[2/2] Launching Frontend on http://localhost:5173..." -ForegroundColor Cyan
+Write-Host "Opening web dashboard in your browser..." -ForegroundColor Green
+Start-Process "http://localhost:5173"
 Write-Host "Press Ctrl+C to terminate both servers.`n" -ForegroundColor Yellow
 
 try {
