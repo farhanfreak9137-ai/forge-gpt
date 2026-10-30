@@ -90,9 +90,31 @@ class BrowserManager:
             logger.error(f"Failed to launch Microsoft Edge desktop process: {e}")
         return False
 
+    def _reset_state(self):
+        """Force-reset internal browser state so next start() creates a fresh context."""
+        self._context = None
+        self._playwright = None
+        self._is_running = False
+
+    async def _is_context_alive(self) -> bool:
+        """Return True only if self._context is still usable (has at least one accessible page)."""
+        if not self._context:
+            return False
+        try:
+            # Accessing .pages on a closed context raises an error
+            _ = self._context.pages
+            return True
+        except Exception:
+            return False
+
     async def start(self) -> BrowserContext:
+        # If we think we're running, verify the context is still actually alive
         if self._is_running and self._context:
-            return self._context
+            if not await self._is_context_alive():
+                logger.warning("Detected stale browser context; resetting and reconnecting.")
+                self._reset_state()
+            else:
+                return self._context
 
         os.makedirs(self.profile_dir, exist_ok=True)
         self.ensure_edge_running()
@@ -145,24 +167,40 @@ class BrowserManager:
             return self._context
         except Exception as e:
             logger.error(f"Failed to start Playwright browser: {e}")
-            self._is_running = False
+            self._reset_state()
             raise
 
     async def get_page(self) -> Page:
-        context = await self.start()
-        self.focus_edge_window()
-        # Find ChatGPT page if one already exists
-        for p in context.pages:
-            if "chatgpt.com" in p.url:
-                await p.bring_to_front()
-                return p
-        if context.pages:
-            p = context.pages[0]
-            await p.bring_to_front()
-            return p
-        new_page = await context.new_page()
-        await new_page.bring_to_front()
-        return new_page
+        """Retrieve a usable Page for ChatGPT interaction.
+        Automatically restarts the browser if the context or page is found to be dead.
+        """
+        for attempt in range(2):  # try twice: once normally, once after a forced restart
+            try:
+                context = await self.start()
+                self.focus_edge_window()
+                # Prefer an existing ChatGPT page
+                for p in context.pages:
+                    if "chatgpt.com" in p.url:
+                        await p.bring_to_front()
+                        return p
+                # Fall back to any existing page
+                if context.pages:
+                    p = context.pages[0]
+                    await p.bring_to_front()
+                    return p
+                # No pages open — create one
+                new_page = await context.new_page()
+                await new_page.bring_to_front()
+                return new_page
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning(f"get_page() failed on attempt {attempt + 1} ({exc}); forcing browser restart.")
+                    self._reset_state()
+                    # Make sure CDP port is also reset so ensure_edge_running re-launches Edge
+                    continue
+                else:
+                    logger.error(f"get_page() failed after browser restart: {exc}")
+                    raise
 
     async def new_page(self) -> Page:
         return await self.get_page()
@@ -220,7 +258,7 @@ class BrowserManager:
                     if (userEl) {
                         userText = userEl.innerText.trim();
                     } else {
-                        const m = t.innerText.match(/You said:\\s*You([\\s\\S]*?)ChatGPT said:/);
+                        const m = t.innerText.match(/You said:\\s*You([\\S\\s]*?)ChatGPT said:/);
                         if (m) userText = m[1].trim();
                     }
                     if (userText) {
@@ -231,7 +269,7 @@ class BrowserManager:
                             timestamp: new Date().toISOString()
                         });
                     }
-                    
+
                     let assistantText = '';
                     const assistantEl = t.querySelector('[class*="DilResponseRoot"], [class*="ResponseRoot"], [data-message-author-role="assistant"]');
                     if (assistantEl) {
@@ -258,14 +296,13 @@ class BrowserManager:
         try:
             if self._context:
                 await self._context.close()
-                self._context = None
             if self._playwright:
                 await self._playwright.stop()
-                self._playwright = None
-            self._is_running = False
-            logger.info("Browser stopped cleanly.")
         except Exception as e:
             logger.warning(f"Error closing browser: {e}")
+        finally:
+            self._reset_state()
+            logger.info("Browser stopped cleanly.")
 
 
 browser_manager = BrowserManager()

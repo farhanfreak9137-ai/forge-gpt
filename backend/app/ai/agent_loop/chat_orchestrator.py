@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -245,39 +246,92 @@ class ChatOrchestrator:
             payload=user_record,
         )
 
-        # Send the user's exact message directly without any intrusive system prompts or metadata
-        current_prompt = message
+        # Build the prompt. For file/task requests, wrap with format instructions
+        # so ChatGPT outputs parseable ### file: blocks that we can write to disk.
+        FILE_FORMAT = (
+            "When creating or editing files output EACH file in this exact format (no exceptions):\n"
+            "### file: <relative/path/to/file.ext>\n"
+            "```<language>\n"
+            "<complete file content here>\n"
+            "```\n"
+            "Use only relative paths. Now do the following: "
+        )
+        # Heuristic: if the message sounds like a task (create, make, build, write, generate, add, update, fix)
+        # inject the format prefix so ChatGPT knows to output code blocks.
+        task_keywords = ["create", "make", "build", "write", "generate", "add", "update", "fix", "implement", "save", "put"]
+        needs_format_hint = any(kw in message.lower() for kw in task_keywords)
+        lower_message = message.lower()
+        file_request_keywords = ("create", "make", "write", "generate", "save", "add", "update", "fix", "implement")
+        mentions_file = bool(
+            re.search(r"\bfiles?\b", lower_message)
+            or re.search(r"\b[\w.-]+\.[a-z0-9]{1,8}\b", lower_message)
+        )
+        expects_file_output = mentions_file and any(
+            re.search(rf"\b{keyword}\b", lower_message) for keyword in file_request_keywords
+        )
+        current_prompt = (FILE_FORMAT + message) if needs_format_hint else message
+        file_action_retry_count = 0
         repair_iteration = 0
         executed_file_changes = []
         executed_commands = []
+        action_errors = []
         final_reply_text = ""
+        parsed = None
 
         while True:
             # 2. Query ChatGPT
             logger.info(f"Querying AI ({connector.name}) with prompt (length: {len(current_prompt)})...")
             req_id = f"chat-{uuid.uuid4().hex[:8]}"
-            
+
             try:
                 envelope = await connector.send_request(
                     prompt=current_prompt,
                     task_id="chat-studio",
                     request_id=req_id,
                 )
-                
-                # Extract text
+
+                # Extract text from envelope payload
                 if envelope.payload.get("analysis"):
                     raw_reply = str(envelope.payload.get("analysis"))
                 elif envelope.payload.get("summary"):
                     raw_reply = str(envelope.payload.get("summary"))
                 else:
                     raw_reply = envelope.model_dump_json()
+
             except Exception as e:
+                logger.error(f"Error communicating with AI connector: {e}")
+                # If this looks like a browser/Playwright crash, reset state so the next
+                # request gets a fresh browser context instead of reusing a dead one.
+                err_str = str(e).lower()
+                if any(kw in err_str for kw in ["browsercontext", "playwright", "target page", "browser has been closed"]):
+                    try:
+                        from app.browser.manager.browser_manager import browser_manager as _bm
+                        await _bm.close()
+                        logger.info("Browser manager reset after BrowserContext error.")
+                    except Exception:
+                        pass
                 raw_reply = f"Error communicating with AI connector: {e}"
-                logger.error(raw_reply)
 
             # 3. Parse actions vs conversational text
-            parsed: ParsedAgentTurn = ActionParser.parse(raw_reply)
+            parsed = ActionParser.parse(raw_reply)
             final_reply_text = raw_reply
+
+            if expects_file_output and not parsed.file_actions:
+                if file_action_retry_count < 1:
+                    file_action_retry_count += 1
+                    current_prompt = (
+                        f"{FILE_FORMAT}{message}\n\n"
+                        "Your previous response did not include any file content, so no file was saved. "
+                        "Now provide the complete contents for every requested file using the exact format above. "
+                        "Do not acknowledge the request or describe what you would do; output the actual file block."
+                    )
+                    logger.warning("File request returned no file content; retrying once with explicit instructions.")
+                    continue
+
+                error = "No file content was provided after retry; the requested file was not saved."
+                action_errors.append(error)
+                logger.error(error)
+                break
 
             # 4. If no actions (plain casual chat), we are done!
             if not parsed.has_actions:
@@ -301,6 +355,7 @@ class ChatOrchestrator:
                     )
                 except Exception as e:
                     logger.error(f"Failed to write file {fa.file_path}: {e}")
+                    action_errors.append(f"Could not save {fa.file_path}: {e}")
 
             # Record Git checkpoint if files were touched
             if executed_file_changes:
@@ -321,7 +376,7 @@ class ChatOrchestrator:
                     message=f"Executing: {ca.command}",
                     payload={"command": ca.command},
                 )
-                
+
                 try:
                     res = await cmd_runner.run(ca.command)
                     passed = res.get("exit_code") == 0
@@ -374,15 +429,26 @@ class ChatOrchestrator:
             else:
                 break
 
+        # Ensure parsed is always set (fallback if loop never ran)
+        if parsed is None:
+            parsed = ActionParser.parse(final_reply_text)
+
+        clean_message = parsed.clean_message
+        if action_errors:
+            outcome_notice = "File action failed: " + " ".join(action_errors)
+            final_reply_text = f"{final_reply_text.rstrip()}\n\n{outcome_notice}".strip()
+            clean_message = f"{clean_message.rstrip()}\n\n{outcome_notice}".strip()
+
         # 8. Record assistant reply
         assistant_record = {
             "id": assistant_msg_id,
             "sender": "assistant",
             "text": final_reply_text,
-            "clean_message": parsed.clean_message,
+            "clean_message": clean_message,
             "file_actions": [f.model_dump() for f in parsed.file_actions],
             "executed_file_changes": executed_file_changes,
             "executed_commands": executed_commands,
+            "action_errors": action_errors,
             "repair_iterations": repair_iteration,
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -392,7 +458,7 @@ class ChatOrchestrator:
 
         await event_bus.publish(
             event_type="CHAT_MESSAGE_RECEIVED",
-            message=parsed.clean_message[:100],
+            message=clean_message[:100],
             payload=assistant_record,
         )
 

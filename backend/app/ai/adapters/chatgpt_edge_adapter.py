@@ -19,6 +19,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
     """
     Playwright-based Microsoft Edge adapter for interacting with ChatGPT (chatgpt.com).
     Uses persistent browser profile and Microsoft Edge channel to submit prompts and extract replies.
+    Automatically recovers from closed/crashed browser contexts.
     """
 
     def __init__(self, name: str = "chatgpt_edge", config: Optional[Dict[str, Any]] = None):
@@ -43,6 +44,15 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             "interactive": True,
         }
 
+    async def _get_page_with_recovery(self):
+        """Get a browser page, forcing a full browser restart if the first attempt fails."""
+        try:
+            return await browser_manager.get_page()
+        except Exception as exc:
+            logger.warning(f"Initial get_page() failed ({exc}). Forcing full browser reset and retry.")
+            await browser_manager.close()
+            return await browser_manager.get_page()
+
     async def send_request(
         self,
         prompt: str,
@@ -52,7 +62,9 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         context_data: Optional[Dict[str, Any]] = None,
     ) -> AIResponseEnvelope:
         logger.info(f"Opening Microsoft Edge to communicate with ChatGPT at {self.website_url}...")
-        page = await browser_manager.get_page()
+        
+        # Always use recovery-aware page acquisition
+        page = await self._get_page_with_recovery()
         browser_manager.focus_edge_window()
         await page.bring_to_front()
 
@@ -60,7 +72,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             if not page.url or "chatgpt.com" not in page.url:
                 await page.goto(self.website_url, timeout=self.timeout_ms)
                 await page.wait_for_timeout(3000)
-            
+
             browser_manager.focus_edge_window()
             await page.bring_to_front()
 
@@ -82,9 +94,8 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             await ta.focus()
             await page.keyboard.press("Control+A")
             await page.keyboard.press("Backspace")
-            
+
             # 1. Count assistant turns BEFORE submitting the new prompt
-            # Modern ChatGPT uses DilResponseRoot / ResponseRoot containers
             assistant_selector = (
                 '[class*="DilResponseRoot"], '
                 '[class*="ResponseRoot"], '
@@ -95,12 +106,12 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             prior_count = len(prior_assistant_elements)
             logger.info(f"Prior assistant message count before sending: {prior_count}")
 
-            # 2. Type prompt directly as user wrote it
+            # 2. Type the user's prompt
             full_prompt = prompt
             await page.keyboard.type(full_prompt, delay=10)
             await page.wait_for_timeout(500)
 
-            # 3. Locate and click send button or press Enter
+            # 3. Click Send button or press Enter
             send_btn = await page.query_selector(
                 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]'
             )
@@ -133,15 +144,15 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             last_text_len = 0
             stable_ticks = 0
 
-            for _ in range(60):  # poll up to 60-120 seconds
+            for _ in range(60):  # poll up to ~60 seconds
                 await page.wait_for_timeout(1000)
 
-                # Check if stop generating button is active
+                # Check if stop generating button is still active
                 stop_btn = await page.query_selector(
                     'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
                 )
 
-                # Always extract ONLY from the specific new turn container
+                # Extract text from the new turn or last assistant element
                 if new_turn:
                     current_text = (await new_turn.inner_text() or "").strip()
                 else:
@@ -151,7 +162,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                     else:
                         current_text = ""
 
-                # Check for login modal error
+                # Check for login modal / guest session wall
                 is_login_wall = any(w.lower() in current_text.lower() for w in [
                     "log in to use",
                     "sign up or log in",
@@ -160,7 +171,8 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 ])
                 if is_login_wall:
                     raise RuntimeError(
-                        "You are not logged into ChatGPT in Microsoft Edge. Please log into your ChatGPT account in the Edge browser window on your screen, then send your message again."
+                        "You are not logged into ChatGPT in Microsoft Edge. "
+                        "Please log into your ChatGPT account in the Edge browser window, then send your message again."
                     )
 
                 if current_text and current_text != full_prompt.strip():
@@ -171,20 +183,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                         stable_ticks = 0
                         last_text_len = len(current_text)
 
-                # Response is complete when stop button is gone AND text has stabilized
-                if not stop_btn and len(extracted_text) > 0 and stable_ticks >= 2:
-                    logger.info(f"ChatGPT response streaming completed ({len(extracted_text)} chars).")
-                    break
-
-                if current_text and current_text != full_prompt.strip():
-                    extracted_text = current_text
-                    if len(current_text) == last_text_len and len(current_text) > 0:
-                        stable_ticks += 1
-                    else:
-                        stable_ticks = 0
-                        last_text_len = len(current_text)
-
-                # Response is complete when stop button is gone AND text has stabilized
+                # Response is complete when stop button is gone AND text has been stable for 2 ticks
                 if not stop_btn and len(extracted_text) > 0 and stable_ticks >= 2:
                     logger.info(f"ChatGPT response streaming completed ({len(extracted_text)} chars).")
                     break
@@ -195,7 +194,6 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             logger.info(f"Extracted reply from ChatGPT: {extracted_text[:200]}...")
 
             # Attempt to parse as forgeagent.v1 protocol JSON
-            # First check for code block ```json ... ```
             json_candidate = None
             code_block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", extracted_text, re.DOTALL)
             if code_block_match:
@@ -212,7 +210,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 except Exception as e:
                     logger.warning(f"Could not parse JSON payload from ChatGPT: {e}")
 
-            # Check if ChatGPT returned a login gate / guest session modal instead of an actual answer
+            # Check for login wall one final time
             is_login_wall = any(w.lower() in extracted_text.lower() for w in [
                 "log in to use",
                 "sign up or log in",
@@ -221,10 +219,11 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
             ])
             if is_login_wall:
                 raise RuntimeError(
-                    "You are not logged into ChatGPT in Microsoft Edge. Please log into your ChatGPT account in the Edge browser window on your screen, then send your message again."
+                    "You are not logged into ChatGPT in Microsoft Edge. "
+                    "Please log into your ChatGPT account in the Edge browser window, then send your message again."
                 )
 
-            # If natural language text response, wrap in protocol report
+            # Wrap natural language reply in the standard protocol envelope
             clean_reply = re.sub(r"\[ForgeAgent Metadata:[^\]]*\]", "", extracted_text).strip()
             return AIResponseEnvelope(
                 protocol_version="forgeagent.v1",
@@ -241,4 +240,3 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         except Exception as e:
             logger.error(f"ChatGPT Edge interaction failed: {e}")
             raise
-

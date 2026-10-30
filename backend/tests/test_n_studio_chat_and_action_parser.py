@@ -5,7 +5,9 @@ from httpx import AsyncClient, ASGITransport
 
 from app.main import app
 from app.ai.agent_loop.action_parser import ActionParser
-from app.ai.agent_loop.chat_orchestrator import chat_orchestrator
+from app.ai.agent_loop.chat_orchestrator import ChatOrchestrator, chat_orchestrator
+from app.ai.protocol.protocol import AIResponseEnvelope, ResponseType
+from app.core.orchestrator.orchestrator import orchestrator
 from app.workspace.files.file_manager import SafeFileManager
 
 
@@ -76,6 +78,97 @@ def test_action_parser_natural_chatgpt_website_blocks():
     assert "my-portfolio/index.html" in paths
     assert "my-portfolio/style.css" in paths
     assert "my-portfolio/script.js" in paths
+
+
+def test_action_parser_chatgpt_plain_text_file_card():
+    parsed = ActionParser.parse("file: farhan.txt\nPlain text\nfarhan")
+
+    assert parsed.has_actions is True
+    assert len(parsed.file_actions) == 1
+    assert parsed.file_actions[0].file_path == "farhan.txt"
+    assert parsed.file_actions[0].content == "farhan"
+
+
+@pytest.mark.asyncio
+async def test_studio_retries_file_request_and_saves_file(tmp_path):
+    mock_adapter = orchestrator.get_connector("mock")
+    mock_adapter.clear_queue()
+    mock_adapter.queue_response(AIResponseEnvelope(
+        task_id="chat-studio",
+        request_id="acknowledgment",
+        response_type=ResponseType.REPORT_ANALYSIS,
+        payload={"analysis": "Understood. I'll create that file."},
+    ))
+    mock_adapter.queue_response(AIResponseEnvelope(
+        task_id="chat-studio",
+        request_id="file-content",
+        response_type=ResponseType.REPORT_ANALYSIS,
+        payload={"analysis": "### file: farhan.txt\n```text\nfarhan\n```"},
+    ))
+
+    studio = ChatOrchestrator()
+    studio.sessions_file = tmp_path / "studio_sessions.json"
+    studio.sessions = {
+        "test-session": {
+            "id": "test-session",
+            "title": "Create farhan.txt",
+            "messages": [],
+        }
+    }
+    studio.active_session_id = "test-session"
+
+    try:
+        reply = await studio.send_user_message(
+            "Create and save a txt file called farhan with farhan written in it",
+            workspace_path=str(tmp_path),
+            connector_name="mock",
+        )
+
+        assert (tmp_path / "farhan.txt").read_text(encoding="utf-8") == "farhan"
+        assert [change["path"] for change in reply["executed_file_changes"]] == ["farhan.txt"]
+        assert reply["action_errors"] == []
+        assert len(mock_adapter.call_history) >= 2
+        assert "previous response did not include any file content" in mock_adapter.call_history[-1]["prompt"]
+    finally:
+        mock_adapter.clear_queue()
+
+
+@pytest.mark.asyncio
+async def test_studio_reports_file_request_failure_after_retry(tmp_path):
+    mock_adapter = orchestrator.get_connector("mock")
+    mock_adapter.clear_queue()
+    acknowledgment = AIResponseEnvelope(
+        task_id="chat-studio",
+        request_id="acknowledgment",
+        response_type=ResponseType.REPORT_ANALYSIS,
+        payload={"analysis": "Understood. I'll create that file."},
+    )
+    mock_adapter.queue_response(acknowledgment)
+    mock_adapter.queue_response(acknowledgment)
+
+    studio = ChatOrchestrator()
+    studio.sessions_file = tmp_path / "studio_sessions.json"
+    studio.sessions = {
+        "test-session": {
+            "id": "test-session",
+            "title": "Create farhan.txt",
+            "messages": [],
+        }
+    }
+    studio.active_session_id = "test-session"
+
+    try:
+        reply = await studio.send_user_message(
+            "Create and save a txt file called farhan with farhan written in it",
+            workspace_path=str(tmp_path),
+            connector_name="mock",
+        )
+
+        assert not (tmp_path / "farhan.txt").exists()
+        assert len(reply["action_errors"]) == 1
+        assert "file was not saved" in reply["clean_message"]
+    finally:
+        mock_adapter.clear_queue()
 
 
 @pytest.mark.asyncio

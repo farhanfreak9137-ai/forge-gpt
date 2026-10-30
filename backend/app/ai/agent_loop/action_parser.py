@@ -124,6 +124,32 @@ class ActionParser:
                 seen_paths.add(detected_path)
                 file_actions.append(FileAction(file_path=detected_path, content=content))
 
+        # ChatGPT sometimes renders a plain-text code card as a filename, a
+        # "Plain text" label, and the contents, without preserving Markdown fences.
+        lines = response_text.splitlines()
+        for index, line in enumerate(lines[:-2]):
+            header_match = re.fullmatch(r"\s*(?:#{1,6}\s*)?file:\s*(.+?)\s*", line, re.IGNORECASE)
+            if not header_match:
+                continue
+
+            path = header_match.group(1).strip().strip("`\"'")
+            cleaned_path = path.replace("\\", "/").lstrip("/")
+            if (
+                not cleaned_path
+                or ".." in cleaned_path.split("/")
+                or ":" in cleaned_path
+                or "<" in cleaned_path
+                or ">" in cleaned_path
+                or cleaned_path in seen_paths
+                or lines[index + 1].strip().casefold() != "plain text"
+            ):
+                continue
+
+            content = "\n".join(lines[index + 2:]).strip("\r\n")
+            if content.strip():
+                seen_paths.add(cleaned_path)
+                file_actions.append(FileAction(file_path=cleaned_path, content=content))
+
         # 2. Regex to match explicit "### run: <command>" or "```bash\n# run: <cmd>"
         run_pattern = re.compile(
             r"(?:###\s*run:\s*([^\r\n]+))|(?:```(?:bash|sh|cmd|powershell)\s*\r?\n#\s*run:\s*([^\r\n]+)\r?\n```)",
