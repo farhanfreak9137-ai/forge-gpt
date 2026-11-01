@@ -134,7 +134,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
         # Always use recovery-aware page acquisition
         page = await self._get_page_with_recovery()
         browser_manager.focus_edge_window()
-        await page.bring_to_front()
+        await browser_manager._surface(page)
 
         try:
             if not page.url or "chatgpt.com" not in page.url:
@@ -142,7 +142,7 @@ class ChatGPTEdgeAdapter(AIConnectorBase):
                 await page.wait_for_timeout(3000)
 
             browser_manager.focus_edge_window()
-            await page.bring_to_front()
+            await browser_manager._surface(page)
 
             # Locate prompt input element (supports modern ChatGPT ProseMirror contenteditable div and classic textarea)
             ta_selector = (

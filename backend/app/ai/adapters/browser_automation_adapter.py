@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Any, Optional
 from app.ai.adapters.base import AIConnectorBase
 from app.ai.protocol.protocol import AIResponseEnvelope
-from app.browser.manager.browser_manager import browser_manager
+from app.browser.manager.browser_manager import BrowserManager, browser_manager
 
 logger = logging.getLogger("forgeagent.ai.browser_automation")
 
@@ -12,8 +12,14 @@ logger = logging.getLogger("forgeagent.ai.browser_automation")
 class BrowserAutomationAdapter(AIConnectorBase):
     """Playwright-based adapter for provider-permitted chatbot interfaces."""
 
-    def __init__(self, name: str = "browser_automation", config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        name: str = "browser_automation",
+        config: Optional[Dict[str, Any]] = None,
+        manager: Optional[BrowserManager] = None,
+    ):
         super().__init__(name, config)
+        self.browser = manager or browser_manager
         self.target_url = self.config.get("target_url", "http://127.0.0.1:8000/mock-chatbot")
         self.timeout_ms = int(self.config.get("timeout_ms", 30000))
         self.is_permitted = self.config.get("is_permitted", True)  # Safety gate per specification
@@ -45,7 +51,7 @@ class BrowserAutomationAdapter(AIConnectorBase):
         if not self.is_permitted:
             raise PermissionError("Browser automation adapter is disabled because automated interaction is not confirmed permitted.")
 
-        page = await browser_manager.new_page()
+        page = await self.browser.new_page()
         state = "PREPARED"
 
         try:

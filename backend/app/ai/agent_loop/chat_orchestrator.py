@@ -4,12 +4,14 @@ import logging
 import re
 import uuid
 from datetime import datetime
+from app.utils.clock import utcnow
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from app.config.settings import settings
 from app.events.event_bus import event_bus
 from app.core.orchestrator.orchestrator import orchestrator
+from app.core.permissions.policy import permission_policy, PermissionLevel
 from app.workspace.files.file_manager import SafeFileManager
 from app.workspace.git.git_manager import GitManager
 from app.execution.commands.runner import SafeCommandRunner
@@ -35,6 +37,32 @@ class ChatOrchestrator:
         self.active_session_id: Optional[str] = None
         self._lock = asyncio.Lock()
         self._load_sessions()
+        self._start_fresh_chat()
+
+    def _start_fresh_chat(self) -> None:
+        """Each server start opens on a clean chat instead of whichever one was left open last time.
+
+        An existing empty chat is reused, so restarting repeatedly does not pile up blank chats. Nothing
+        touches the browser here: Edge is only involved once a message is sent.
+        """
+        now = utcnow().isoformat()
+        blanks = [s for s in self.sessions.values() if not s.get("messages") and not s.get("chatgpt_id")]
+        if blanks:
+            fresh = max(blanks, key=lambda s: s.get("updated_at", ""))
+            fresh["updated_at"] = now
+        else:
+            new_id = f"session-{uuid.uuid4().hex[:8]}"
+            fresh = {
+                "id": new_id,
+                "title": "New Chat",
+                "created_at": now,
+                "updated_at": now,
+                "messages": [],
+                "chatgpt_id": None,
+            }
+            self.sessions[new_id] = fresh
+        self.active_session_id = fresh["id"]
+        self._save_sessions()
 
     def _load_sessions(self):
         try:
@@ -52,8 +80,8 @@ class ChatOrchestrator:
             self.sessions[new_id] = {
                 "id": new_id,
                 "title": "New Chat",
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
+                "created_at": utcnow().isoformat(),
+                "updated_at": utcnow().isoformat(),
                 "messages": [],
                 "chatgpt_id": None,
             }
@@ -82,8 +110,8 @@ class ChatOrchestrator:
                 self.sessions[new_id] = {
                     "id": new_id,
                     "title": "New Chat",
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "created_at": utcnow().isoformat(),
+                    "updated_at": utcnow().isoformat(),
                     "messages": [],
                     "chatgpt_id": None,
                 }
@@ -104,8 +132,8 @@ class ChatOrchestrator:
                         self.sessions[cid] = {
                             "id": cid,
                             "title": c["title"],
-                            "created_at": datetime.utcnow().isoformat(),
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "created_at": utcnow().isoformat(),
+                            "updated_at": utcnow().isoformat(),
                             "messages": [],
                             "chatgpt_id": cid,
                         }
@@ -137,8 +165,8 @@ class ChatOrchestrator:
         session = {
             "id": new_id,
             "title": title,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": utcnow().isoformat(),
+            "updated_at": utcnow().isoformat(),
             "messages": [],
             "chatgpt_id": None,
         }
@@ -196,14 +224,104 @@ class ChatOrchestrator:
     def clear_history(self) -> None:
         active = self.get_active_session()
         active["messages"] = []
-        active["updated_at"] = datetime.utcnow().isoformat()
+        active["updated_at"] = utcnow().isoformat()
         self._save_sessions()
+
+    @staticmethod
+    async def _run_command(cmd_runner: SafeCommandRunner, command: str) -> Dict[str, Any]:
+        try:
+            res = await cmd_runner.run(command)
+            return {
+                "command": command,
+                "exit_code": res.get("exit_code"),
+                "stdout": res.get("stdout", ""),
+                "stderr": res.get("stderr", ""),
+                "duration_ms": res.get("duration_ms", 0),
+                "passed": res.get("exit_code") == 0,
+                "status": "EXECUTED",
+            }
+        except Exception as e:
+            logger.warning(f"Command execution error: {e}")
+            return {
+                "command": command,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": f"Command error: {e}",
+                "duration_ms": 0,
+                "passed": False,
+                "status": "EXECUTED",
+            }
+
+    def _find_pending_action(self, message_id: str, action_id: str):
+        for session in self.sessions.values():
+            for message in session.get("messages", []):
+                if message.get("id") == message_id:
+                    for action in message.get("pending_actions", []):
+                        if action.get("id") == action_id:
+                            return message, action
+        raise KeyError(f"Pending action {action_id} not found on message {message_id}")
+
+    async def approve_pending_action(self, message_id: str, action_id: str) -> Dict[str, Any]:
+        """Run or apply an action the user has explicitly approved. The allowlist still applies."""
+        message, action = self._find_pending_action(message_id, action_id)
+        if action["status"] != "PENDING_APPROVAL":
+            raise ValueError(f"Action already {action['status']}")
+        if permission_policy.is_emergency_stop_active:
+            raise PermissionError("Emergency stop is active; reset it before approving actions.")
+
+        ws_path = Path(action["workspace_path"])
+        if action["kind"] == "command":
+            result = await self._run_command(SafeCommandRunner(str(ws_path)), action["command"])
+            message.setdefault("executed_commands", []).append(result)
+            action["status"] = "EXECUTED"
+            action["result"] = result
+            await event_bus.publish(
+                event_type="STUDIO_COMMAND_FINISHED",
+                message=f"Approved command finished with exit code {result.get('exit_code')}: {action['command']}",
+                payload=result,
+            )
+        else:
+            try:
+                SafeFileManager(str(ws_path)).write_file_atomic(action["file_path"], action["content"])
+                message.setdefault("executed_file_changes", []).append({
+                    "path": action["file_path"],
+                    "lines": len(action["content"].splitlines()),
+                    "status": "APPLIED",
+                })
+                action["status"] = "APPLIED"
+            except Exception as e:
+                action["status"] = "FAILED"
+                action["result"] = {"error": str(e)}
+        self._save_sessions()
+        return action
+
+    def reject_pending_action(self, message_id: str, action_id: str) -> Dict[str, Any]:
+        _, action = self._find_pending_action(message_id, action_id)
+        if action["status"] != "PENDING_APPROVAL":
+            raise ValueError(f"Action already {action['status']}")
+        action["status"] = "REJECTED"
+        self._save_sessions()
+        return action
+
+    def prune_sessions(self, keep_latest: int = 10, remove_empty: bool = True) -> Dict[str, int]:
+        """Drop empty chats and everything older than the newest `keep_latest` (active chat is kept)."""
+        ordered = sorted(self.sessions.values(), key=lambda s: s.get("updated_at", ""), reverse=True)
+        removed = 0
+        for index, sess in enumerate(ordered):
+            if sess["id"] == self.active_session_id:
+                continue
+            empty = remove_empty and not sess.get("messages")
+            if empty or index >= keep_latest:
+                del self.sessions[sess["id"]]
+                removed += 1
+        self._save_sessions()
+        return {"removed": removed, "remaining": len(self.sessions)}
 
     async def send_user_message(
         self,
         message: str,
         workspace_path: Optional[str] = None,
-        auto_pilot: bool = True,
+        auto_pilot: bool = False,
         connector_name: Optional[str] = None,
         max_repair_iterations: int = 3,
     ) -> Dict[str, Any]:
@@ -211,10 +329,12 @@ class ChatOrchestrator:
         Processes a user message:
         1. Dispatches message to ChatGPT.
         2. Parses response for conversation vs code/command actions.
-        3. Executes actions (writes files, runs commands).
+        3. Writes files; runs commands only when auto_pilot is on AND the permission policy and
+           command allowlist both accept them. Everything else is queued as a pending action that
+           the user must approve (see approve_pending_action).
         4. In auto_pilot mode, if tests fail, loops back to ChatGPT with error logs until resolved.
         """
-        ws_path = Path(workspace_path or settings.base_dir).resolve()
+        ws_path = Path(workspace_path or settings.workspace_dir).resolve()
         connector = orchestrator.get_connector(connector_name)
         file_mgr = SafeFileManager(str(ws_path))
         git_mgr = GitManager(str(ws_path))
@@ -234,10 +354,10 @@ class ChatOrchestrator:
             "id": user_msg_id,
             "sender": "user",
             "text": message,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utcnow().isoformat(),
         }
         active_sess.setdefault("messages", []).append(user_record)
-        active_sess["updated_at"] = datetime.utcnow().isoformat()
+        active_sess["updated_at"] = utcnow().isoformat()
         self._save_sessions()
 
         await event_bus.publish(
@@ -275,6 +395,7 @@ class ChatOrchestrator:
         executed_file_changes = []
         executed_commands = []
         action_errors = []
+        pending_actions: List[Dict[str, Any]] = []
         final_reply_text = ""
         parsed = None
 
@@ -349,6 +470,17 @@ class ChatOrchestrator:
 
             # 5. Apply File Actions ("The Hands")
             for fa in parsed.file_actions:
+                if permission_policy.is_emergency_stop_active or permission_policy.is_sensitive_path(fa.file_path):
+                    pending_actions.append({
+                        "id": uuid.uuid4().hex[:12],
+                        "kind": "file",
+                        "status": "PENDING_APPROVAL",
+                        "reason": f"Writing sensitive file '{fa.file_path}' requires explicit approval",
+                        "file_path": fa.file_path,
+                        "content": fa.content,
+                        "workspace_path": str(ws_path),
+                    })
+                    continue
                 try:
                     file_mgr.write_file_atomic(fa.file_path, fa.content)
                     executed_file_changes.append({
@@ -379,6 +511,49 @@ class ChatOrchestrator:
             last_failure_output = ""
 
             for ca in parsed.command_actions:
+                allowed, allow_reason = cmd_runner.is_command_allowed(ca.command)
+                perm_level, perm_reason = permission_policy.evaluate_command(ca.command)
+
+                if not allowed:
+                    # Never runnable, with or without approval
+                    logger.warning(f"Blocked command from AI: {ca.command} ({allow_reason})")
+                    cmd_record = {
+                        "command": ca.command,
+                        "exit_code": None,
+                        "stdout": "",
+                        "stderr": allow_reason,
+                        "duration_ms": 0,
+                        "passed": False,
+                        "status": "BLOCKED",
+                    }
+                    executed_commands.append(cmd_record)
+                    await event_bus.publish(
+                        event_type="STUDIO_COMMAND_BLOCKED",
+                        message=f"Blocked: {ca.command} - {allow_reason}",
+                        payload=cmd_record,
+                    )
+                    continue
+
+                if not auto_pilot or perm_level != PermissionLevel.TASK_ALLOWED:
+                    reason = perm_reason if perm_level != PermissionLevel.TASK_ALLOWED else (
+                        "Auto-Pilot is off: commands suggested by the AI need your approval before they run"
+                    )
+                    pending = {
+                        "id": uuid.uuid4().hex[:12],
+                        "kind": "command",
+                        "status": "PENDING_APPROVAL",
+                        "reason": reason,
+                        "command": ca.command,
+                        "workspace_path": str(ws_path),
+                    }
+                    pending_actions.append(pending)
+                    await event_bus.publish(
+                        event_type="STUDIO_APPROVAL_REQUIRED",
+                        message=f"Approval required: {ca.command}",
+                        payload=pending,
+                    )
+                    continue
+
                 logger.info(f"Executing command: {ca.command}")
                 await event_bus.publish(
                     event_type="STUDIO_COMMAND_STARTED",
@@ -386,29 +561,7 @@ class ChatOrchestrator:
                     payload={"command": ca.command},
                 )
 
-                try:
-                    res = await cmd_runner.run(ca.command)
-                    passed = res.get("exit_code") == 0
-                    cmd_record = {
-                        "command": ca.command,
-                        "exit_code": res.get("exit_code"),
-                        "stdout": res.get("stdout", ""),
-                        "stderr": res.get("stderr", ""),
-                        "duration_ms": res.get("duration_ms", 0),
-                        "passed": passed,
-                    }
-                except Exception as e:
-                    logger.warning(f"Command execution error: {e}")
-                    passed = False
-                    cmd_record = {
-                        "command": ca.command,
-                        "exit_code": 1,
-                        "stdout": "",
-                        "stderr": f"Command error: {e}",
-                        "duration_ms": 0,
-                        "passed": False,
-                    }
-
+                cmd_record = await self._run_command(cmd_runner, ca.command)
                 executed_commands.append(cmd_record)
 
                 await event_bus.publish(
@@ -417,7 +570,7 @@ class ChatOrchestrator:
                     payload=cmd_record,
                 )
 
-                if not passed:
+                if not cmd_record["passed"]:
                     has_command_failure = True
                     last_failure_output = f"Command '{ca.command}' failed:\n{cmd_record.get('stderr') or cmd_record.get('stdout')}"
 
@@ -458,11 +611,12 @@ class ChatOrchestrator:
             "executed_file_changes": executed_file_changes,
             "executed_commands": executed_commands,
             "action_errors": action_errors,
+            "pending_actions": pending_actions,
             "repair_iterations": repair_iteration,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utcnow().isoformat(),
         }
         active_sess.setdefault("messages", []).append(assistant_record)
-        active_sess["updated_at"] = datetime.utcnow().isoformat()
+        active_sess["updated_at"] = utcnow().isoformat()
         self._save_sessions()
 
         await event_bus.publish(

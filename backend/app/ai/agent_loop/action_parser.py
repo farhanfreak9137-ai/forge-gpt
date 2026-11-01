@@ -101,6 +101,8 @@ class ActionParser:
             preceding = response_text[:match.start()].strip()
             lines = preceding.splitlines()
             for line in reversed(lines[-4:]):
+                if re.match(r"(?i)^\s*(?:#{1,6}\s*)?run\s*:", line):
+                    break  # the block echoes a command; a filename inside it is not a file to write
                 clean_line = re.sub(r"^[#*\s\d\.\-:`'\"]+|[*\s:`'\"]+$", "", line).strip()
                 m = re.search(r"([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)", clean_line)
                 if m:
@@ -145,9 +147,23 @@ class ActionParser:
                 content_start += 1
             content_end = file_headers[index + 1].start() if index + 1 < len(file_headers) else len(response_text)
             content = response_text[content_start:content_end].strip("\r\n")
-            first_line, separator, remaining_content = content.partition("\n")
-            if first_line.strip().casefold() in language_labels:
-                content = remaining_content if separator else ""
+            while True:
+                first_line, separator, remaining_content = content.partition("\n")
+                cleaned_fl = first_line.strip().casefold()
+                if cleaned_fl in language_labels or cleaned_fl in {"run", "copy", "copy code", "edit"}:
+                    content = remaining_content.strip("\r\n") if separator else ""
+                else:
+                    break
+
+            # Strip any trailing section header or prose (e.g. '2. Reconstructed test_calculator.py' or 'Note: ...')
+            trailing_prose = re.search(r"(?im)[\r\n]+(?:\d+\.\s+[^\r\n]+|#{1,6}\s+[^\r\n]+|Note:[^\r\n]+)$", content)
+            if trailing_prose:
+                content = content[:trailing_prose.start()].strip("\r\n")
+
+            if index + 1 >= len(file_headers):
+                prose_match = re.search(r"(?im)\n(?:\d+\.\s+[A-Za-z]|#{1,6}\s+|Note:|\*\*[A-Za-z])", content)
+                if prose_match:
+                    content = content[:prose_match.start()].strip("\r\n")
             content = content.strip("\r\n")
 
             if (
