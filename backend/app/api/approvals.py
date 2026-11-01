@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.utils.clock import utcnow
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +53,7 @@ async def decide_approval(
 
     record.status = "APPROVED" if data.approved else "REJECTED"
     record.decision_reason = data.reason or ("Approved by user" if data.approved else "Rejected by user")
-    record.decided_at = datetime.utcnow()
+    record.decided_at = utcnow()
     await db.commit()
     await db.refresh(record)
 
@@ -67,6 +68,8 @@ async def decide_approval(
     # If approved, resume the task execution
     if data.approved:
         await orchestrator.resume_task(record.task_id)
+    else:
+        await orchestrator.reject_task(record.task_id, record.decision_reason)
 
     return ApprovalResponse(
         id=record.id,

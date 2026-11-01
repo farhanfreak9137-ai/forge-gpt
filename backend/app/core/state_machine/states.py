@@ -26,9 +26,9 @@ ALLOWED_TRANSITIONS: Dict[TaskState, Set[TaskState]] = {
     TaskState.CREATED: {TaskState.SCANNING, TaskState.PAUSED, TaskState.CANCELLED},
     TaskState.SCANNING: {TaskState.PLANNING, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.PLANNING: {TaskState.WAITING_FOR_AI, TaskState.FAILED, TaskState.CANCELLED},
-    TaskState.WAITING_FOR_AI: {TaskState.PARSING, TaskState.VALIDATING, TaskState.APPLYING, TaskState.FAILED, TaskState.PAUSED, TaskState.CANCELLED},
+    TaskState.WAITING_FOR_AI: {TaskState.PARSING, TaskState.VALIDATING, TaskState.APPLYING, TaskState.TESTING, TaskState.FAILED, TaskState.PAUSED, TaskState.CANCELLED},
     TaskState.PARSING: {TaskState.VALIDATING, TaskState.WAITING_FOR_AI, TaskState.FAILED, TaskState.CANCELLED},
-    TaskState.VALIDATING: {TaskState.APPLYING, TaskState.WAITING_FOR_APPROVAL, TaskState.WAITING_FOR_AI, TaskState.FAILED, TaskState.CANCELLED},
+    TaskState.VALIDATING: {TaskState.APPLYING, TaskState.WAITING_FOR_APPROVAL, TaskState.WAITING_FOR_AI, TaskState.VERIFYING, TaskState.FAILED, TaskState.CANCELLED},  # VERIFYING: AI answered 'finish', nothing to apply
     TaskState.WAITING_FOR_APPROVAL: {TaskState.APPLYING, TaskState.PLANNING, TaskState.PAUSED, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.APPLYING: {TaskState.TESTING, TaskState.VERIFYING, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.TESTING: {TaskState.VERIFYING, TaskState.REPAIRING, TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED},
@@ -36,9 +36,9 @@ ALLOWED_TRANSITIONS: Dict[TaskState, Set[TaskState]] = {
     TaskState.VERIFYING: {TaskState.COMPLETED, TaskState.REPAIRING, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.COMPLETED: set(),  # Terminal
     TaskState.PAUSED: {TaskState.SCANNING, TaskState.PLANNING, TaskState.WAITING_FOR_AI, TaskState.APPLYING, TaskState.TESTING, TaskState.CANCELLED},
-    TaskState.FAILED: {TaskState.RECOVERY_REQUIRED, TaskState.PLANNING},
+    TaskState.FAILED: {TaskState.RECOVERY_REQUIRED, TaskState.PLANNING, TaskState.CANCELLED},  # CANCELLED: user dismisses a failed task
     TaskState.CANCELLED: set(),  # Terminal
-    TaskState.RECOVERY_REQUIRED: {TaskState.CREATED, TaskState.SCANNING, TaskState.PAUSED, TaskState.FAILED},
+    TaskState.RECOVERY_REQUIRED: {TaskState.CREATED, TaskState.SCANNING, TaskState.PAUSED, TaskState.FAILED, TaskState.CANCELLED},
 }
 
 

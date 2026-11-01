@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from app.utils.clock import utcnow
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from pydantic import BaseModel, Field
 
@@ -17,7 +18,7 @@ class ActivityEvent(BaseModel):
     severity: str = "INFO"  # INFO, WARNING, ERROR, SUCCESS
     message: str
     payload: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
 
 
 class EventBus:
@@ -55,7 +56,7 @@ class EventBus:
             project_id=project_id,
             severity=severity,
             payload=payload,
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
         )
 
         # Persist to database

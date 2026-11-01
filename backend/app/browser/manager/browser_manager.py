@@ -3,6 +3,7 @@ import time
 import shutil
 import logging
 import subprocess
+import threading
 import urllib.request
 from typing import Optional, List, Dict, Any
 from pathlib import Path
@@ -20,10 +21,13 @@ class BrowserManager:
         profile_dir: Optional[Path] = None,
         headless: Optional[bool] = None,
         browser_channel: str = "msedge",
+        use_cdp: bool = True,
     ):
         self.profile_dir = profile_dir or settings.browser_profile_dir
         self.headless = settings.browser_headless if headless is None else headless
         self.browser_channel = browser_channel
+        # use_cdp=False runs an isolated, self-contained Chromium (no Edge, no CDP port); used by tests
+        self.use_cdp = use_cdp
         self._playwright: Optional[Playwright] = None
         self._context: Optional[BrowserContext] = None
         self._is_running = False
@@ -40,7 +44,13 @@ class BrowserManager:
         return None
 
     def focus_edge_window(self) -> None:
-        """Brings the Microsoft Edge / ChatGPT window to the front of Windows desktop."""
+        """Brings the Microsoft Edge / ChatGPT window to the front of Windows desktop.
+
+        Off by default (settings.edge_steal_focus): the window stays visible but never pops in front of
+        whatever the user is working in.
+        """
+        if not settings.edge_steal_focus:
+            return
         try:
             ps_script = (
                 '$w = New-Object -ComObject WScript.Shell; '
@@ -53,6 +63,46 @@ class BrowserManager:
             )
         except Exception:
             pass
+
+    async def _surface(self, page: Page) -> None:
+        """Activate a tab (which also raises its window) only when focus stealing is explicitly enabled."""
+        if settings.edge_steal_focus:
+            await page.bring_to_front()
+
+    @staticmethod
+    def _send_windows_to_back(pid: int, timeout: float = 12.0) -> None:
+        """Windows only: drop a freshly launched Edge below the other windows without activating it.
+
+        The window stays open and visible (taskbar, and on screen wherever it is not covered); it just does
+        not land on top of the user's main window.
+        """
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            HWND_BOTTOM, GW_OWNER = 1, 4
+            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+            enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            moved: List[int] = []
+
+            def visit(hwnd, _lparam):
+                if user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, GW_OWNER):
+                    owner = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                    if owner.value == pid:
+                        user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                        moved.append(hwnd)
+                return True
+
+            deadline = time.time() + timeout
+            while time.time() < deadline and not moved:
+                user32.EnumWindows(enum_proc(visit), 0)
+                time.sleep(0.3)
+        except Exception as exc:  # purely cosmetic; never let it break a launch
+            logger.debug(f"Could not send Edge window to back: {exc}")
 
     def ensure_edge_running(self) -> bool:
         """Verifies if Edge CDP is running; if not, launches visible Edge desktop process."""
@@ -76,7 +126,16 @@ class BrowserManager:
         ]
         try:
             logger.info(f"Launching visible Microsoft Edge on desktop: {cmd}")
-            subprocess.Popen(cmd)
+            popen_kwargs: Dict[str, Any] = {}
+            if os.name == "nt" and not settings.edge_steal_focus:
+                # SW_SHOWNOACTIVATE: show the window without making it the active one
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 4
+                popen_kwargs["startupinfo"] = startupinfo
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            if not settings.edge_steal_focus:
+                threading.Thread(target=self._send_windows_to_back, args=(proc.pid,), daemon=True).start()
             for _ in range(20):
                 time.sleep(0.5)
                 try:
@@ -117,6 +176,8 @@ class BrowserManager:
                 return self._context
 
         os.makedirs(self.profile_dir, exist_ok=True)
+        if not self.use_cdp:
+            return await self._start_isolated()
         self.ensure_edge_running()
 
         try:
@@ -170,6 +231,22 @@ class BrowserManager:
             self._reset_state()
             raise
 
+    async def _start_isolated(self) -> BrowserContext:
+        """Bundled Chromium with its own profile directory; never touches the user's Edge."""
+        try:
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.profile_dir),
+                headless=self.headless,
+            )
+            self._is_running = True
+            return self._context
+        except Exception as e:
+            logger.error(f"Failed to start isolated browser: {e}")
+            self._reset_state()
+            raise
+
     async def get_page(self) -> Page:
         """Retrieve a usable Page for ChatGPT interaction.
         Automatically restarts the browser if the context or page is found to be dead.
@@ -181,16 +258,16 @@ class BrowserManager:
                 # Prefer an existing ChatGPT page
                 for p in context.pages:
                     if "chatgpt.com" in p.url:
-                        await p.bring_to_front()
+                        await self._surface(p)
                         return p
                 # Fall back to any existing page
                 if context.pages:
                     p = context.pages[0]
-                    await p.bring_to_front()
+                    await self._surface(p)
                     return p
                 # No pages open — create one
                 new_page = await context.new_page()
-                await new_page.bring_to_front()
+                await self._surface(new_page)
                 return new_page
             except Exception as exc:
                 if attempt == 0:
@@ -203,13 +280,23 @@ class BrowserManager:
                     raise
 
     async def new_page(self) -> Page:
-        return await self.get_page()
+        """Open a dedicated tab. Callers may close it without affecting the user's existing tabs."""
+        for attempt in range(2):
+            try:
+                context = await self.start()
+                return await context.new_page()
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning(f"new_page() failed ({exc}); forcing browser restart.")
+                    self._reset_state()
+                    continue
+                raise
 
     async def navigate_to_chat(self, url: str) -> Page:
         """Navigates Edge to a specific ChatGPT conversation or new chat and brings it forward."""
         page = await self.get_page()
         self.focus_edge_window()
-        await page.bring_to_front()
+        await self._surface(page)
         if page.url != url:
             await page.goto(url, timeout=30000)
             await page.wait_for_timeout(1000)

@@ -1,7 +1,9 @@
 import asyncio
+from datetime import timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -29,6 +31,8 @@ from app.schemas.schemas import (
     RollbackRequest,
 )
 from app.core.orchestrator.orchestrator import orchestrator
+from app.core.state_machine.states import TaskState, StateMachineError
+from app.utils.clock import utcnow
 from app.workspace.git.git_manager import GitManager
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -182,22 +186,107 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
+async def _control(action, task_id: str, status: str):
+    try:
+        await action(task_id)
+    except StateMachineError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": status, "task_id": task_id}
+
+
 @router.post("/{task_id}/pause")
 async def pause_task(task_id: str):
-    await orchestrator.pause_task(task_id)
-    return {"status": "PAUSED", "task_id": task_id}
+    return await _control(orchestrator.pause_task, task_id, "PAUSED")
 
 
 @router.post("/{task_id}/resume")
 async def resume_task(task_id: str):
-    await orchestrator.resume_task(task_id)
-    return {"status": "RESUMED", "task_id": task_id}
+    return await _control(orchestrator.resume_task, task_id, "RESUMED")
 
 
 @router.post("/{task_id}/cancel")
 async def cancel_task(task_id: str):
-    await orchestrator.cancel_task(task_id)
-    return {"status": "CANCELLED", "task_id": task_id}
+    return await _control(orchestrator.cancel_task, task_id, "CANCELLED")
+
+
+TERMINAL_STATES = {TaskState.COMPLETED.value, TaskState.FAILED.value, TaskState.CANCELLED.value}
+STALE_DEFAULT_STATES = [
+    TaskState.CREATED.value,
+    TaskState.PAUSED.value,
+    TaskState.WAITING_FOR_APPROVAL.value,
+    TaskState.RECOVERY_REQUIRED.value,
+]
+
+
+class CleanupRequest(BaseModel):
+    older_than_hours: float = Field(default=24, ge=0)
+    project_id: Optional[str] = None  # limit the sweep to one project
+    states: List[str] = Field(default_factory=lambda: list(STALE_DEFAULT_STATES))
+    delete_finished: bool = False  # also delete finished (completed/failed/cancelled) tasks past the age limit
+
+
+@router.post("/cleanup")
+async def cleanup_stale_tasks(data: CleanupRequest, db: AsyncSession = Depends(get_db)):
+    """Cancel tasks stuck in a waiting state (rejecting their pending approvals); optionally purge finished ones."""
+    unknown = [st for st in data.states if st not in {s.value for s in TaskState}]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown task states: {unknown}")
+
+    cutoff = utcnow() - timedelta(hours=data.older_than_hours)
+    query = select(Task).where(Task.updated_at <= cutoff)
+    if data.project_id:
+        query = query.where(Task.project_id == data.project_id)
+    result = await db.execute(
+        query.options(
+            selectinload(Task.steps),
+            selectinload(Task.ai_requests),
+            selectinload(Task.proposed_changes),
+            selectinload(Task.executions),
+            selectinload(Task.test_results),
+            selectinload(Task.approvals),
+            selectinload(Task.checkpoints),
+        )
+    )
+    cancelled, deleted = [], []
+    for task in result.scalars().all():
+        if task.state in data.states and task.state not in TERMINAL_STATES:
+            for approval in task.approvals:
+                if approval.status == "PENDING":
+                    approval.status = "REJECTED"
+                    approval.decision_reason = "Task cleaned up as stale"
+                    approval.decided_at = utcnow()
+            task.state = TaskState.CANCELLED.value
+            task.error_message = task.error_message or "Cancelled by stale-task cleanup"
+            task.updated_at = utcnow()
+            cancelled.append(task.id)
+        elif data.delete_finished and task.state in TERMINAL_STATES:
+            await db.delete(task)
+            deleted.append(task.id)
+    await db.commit()
+    return {"cancelled": len(cancelled), "deleted": len(deleted), "cancelled_ids": cancelled}
+
+
+@router.delete("/{task_id}")
+async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Task).where(Task.id == task_id).options(
+            selectinload(Task.steps),
+            selectinload(Task.ai_requests),
+            selectinload(Task.proposed_changes),
+            selectinload(Task.executions),
+            selectinload(Task.test_results),
+            selectinload(Task.approvals),
+            selectinload(Task.checkpoints),
+        )
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.state not in TERMINAL_STATES:
+        raise HTTPException(status_code=409, detail=f"Task is {task.state}; cancel it before deleting.")
+    await db.delete(task)
+    await db.commit()
+    return {"status": "DELETED", "task_id": task_id}
 
 
 @router.post("/{task_id}/rollback")

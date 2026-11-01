@@ -15,7 +15,7 @@ router = APIRouter(prefix="/studio", tags=["studio"])
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     workspace_path: Optional[str] = None
-    auto_pilot: bool = True
+    auto_pilot: bool = False  # AI-suggested commands need approval unless the user opts in
     connector_name: Optional[str] = None
 
 
@@ -27,6 +27,11 @@ class SaveFileRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = "New Chat"
+
+
+class PruneSessionsRequest(BaseModel):
+    keep_latest: int = Field(default=10, ge=1)
+    remove_empty: bool = True
 
 
 @router.get("/sessions")
@@ -69,13 +74,41 @@ async def delete_chat_session(session_id: str):
     return {"status": "DELETED", "session_id": session_id}
 
 
+@router.post("/sessions/prune")
+async def prune_chat_sessions(data: Optional[PruneSessionsRequest] = None):
+    """Remove empty chats and old chats beyond the newest N (the active chat is always kept)."""
+    data = data or PruneSessionsRequest()
+    return chat_orchestrator.prune_sessions(keep_latest=data.keep_latest, remove_empty=data.remove_empty)
+
+
+@router.post("/messages/{message_id}/actions/{action_id}/approve")
+async def approve_pending_action(message_id: str, action_id: str):
+    """Approve a command or sensitive file write the AI proposed. The command allowlist still applies."""
+    try:
+        return await chat_orchestrator.approve_pending_action(message_id, action_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/messages/{message_id}/actions/{action_id}/reject")
+async def reject_pending_action(message_id: str, action_id: str):
+    try:
+        return chat_orchestrator.reject_pending_action(message_id, action_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @router.post("/chat")
 async def chat_with_agent(data: ChatRequest):
     """Send natural language message to the agent / ChatGPT and auto-execute code/commands."""
     try:
         reply = await chat_orchestrator.send_user_message(
             message=data.message,
-            workspace_path=data.workspace_path or str(settings.base_dir.parent),
+            workspace_path=data.workspace_path or str(settings.workspace_dir),
             auto_pilot=data.auto_pilot,
             connector_name=data.connector_name,
         )
@@ -122,7 +155,7 @@ async def clear_chat_history():
 @router.get("/files")
 async def get_workspace_files(workspace_path: Optional[str] = Query(None)):
     """Retrieve scanned workspace file list and directory tree for the IDE panel."""
-    target_path = Path(workspace_path or settings.base_dir.parent).resolve()
+    target_path = Path(workspace_path or settings.workspace_dir).resolve()
     if not target_path.exists():
         raise HTTPException(status_code=404, detail="Workspace directory not found")
 
@@ -140,7 +173,7 @@ async def get_workspace_files(workspace_path: Optional[str] = Query(None)):
 @router.get("/file-content")
 async def get_file_content(path: str = Query(...), workspace_path: Optional[str] = Query(None)):
     """Read a specific file in the workspace to display in Monaco editor."""
-    target_ws = Path(workspace_path or settings.base_dir.parent).resolve()
+    target_ws = Path(workspace_path or settings.workspace_dir).resolve()
     fm = SafeFileManager(str(target_ws))
     try:
         content = fm.read_file(path)
@@ -152,7 +185,7 @@ async def get_file_content(path: str = Query(...), workspace_path: Optional[str]
 @router.post("/save-file")
 async def save_file_content(data: SaveFileRequest):
     """Directly save file modifications from Monaco editor."""
-    target_ws = Path(data.workspace_path or settings.base_dir.parent).resolve()
+    target_ws = Path(data.workspace_path or settings.workspace_dir).resolve()
     fm = SafeFileManager(str(target_ws))
     try:
         hash_val = fm.write_file_atomic(data.file_path, data.content)

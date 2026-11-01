@@ -38,6 +38,13 @@ class SafeFileManager:
 
         return target
 
+    @staticmethod
+    def _assert_mutable(relative_path: str) -> None:
+        """Version-control internals (hooks, config) can execute code, so they are never writable."""
+        segments = relative_path.replace("\\", "/").split("/")
+        if any(seg.lower() == ".git" for seg in segments):
+            raise PermissionError(f"Modifying version-control metadata is prohibited: {relative_path}")
+
     def compute_hash(self, relative_path: str) -> Optional[str]:
         target = self.resolve_safe_path(relative_path)
         if not target.exists() or not target.is_file():
@@ -56,6 +63,7 @@ class SafeFileManager:
 
     def write_file_atomic(self, relative_path: str, content: str) -> str:
         """Atomically write content to file within workspace."""
+        self._assert_mutable(relative_path)
         target = self.resolve_safe_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -83,6 +91,8 @@ class SafeFileManager:
         return self.compute_hash(relative_path) or ""
 
     def move_file(self, source_rel: str, dest_rel: str) -> None:
+        self._assert_mutable(source_rel)
+        self._assert_mutable(dest_rel)
         src = self.resolve_safe_path(source_rel)
         dst = self.resolve_safe_path(dest_rel)
         if not src.exists():
@@ -91,6 +101,7 @@ class SafeFileManager:
         shutil.move(str(src), str(dst))
 
     def delete_file(self, relative_path: str) -> None:
+        self._assert_mutable(relative_path)
         target = self.resolve_safe_path(relative_path)
         if not target.exists():
             return

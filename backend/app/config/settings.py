@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     data_dir: Path = base_dir / "data"
     database_url: str = f"sqlite+aiosqlite:///{base_dir / 'data' / 'forgeagent.db'}"
     browser_profile_dir: Path = base_dir / "data" / "browser_profile"
+    # Default sandbox for Studio chat: keeps agent output (and edits) out of ForgeAgent's own source tree
+    workspace_dir: Path = base_dir.parent / "workspace"
 
     # Execution Engine Config
     execution_mode: str = "native"  # "native" or "docker"
@@ -42,20 +44,19 @@ class Settings(BaseSettings):
         "pytest",
         "node",
         "npm",
-        "npx",
         "pip",
         "uv",
         "cargo",
         "dotnet",
         "go",
-        "cmd",
-        "powershell",
-    ]
+    ]  # shells (cmd, powershell) and package runners (npx) are deliberately absent
 
     # AI Connector Default Settings
     default_ai_connector: str = "chatgpt_edge"  # "mock", "openai", "ollama", "browser_handoff", "browser_automation", "chatgpt_edge"
     chatgpt_edge_url: str = "https://chatgpt.com"
     browser_headless: bool = False  # Set to False to watch Edge open and type live
+    # False (default): the ChatGPT window stays visible but never grabs focus or jumps in front of your work.
+    edge_steal_focus: bool = False
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: Optional[str] = None
     openai_model_id: str = "gpt-4o"
@@ -93,3 +94,4 @@ class Settings(BaseSettings):
 settings = Settings()
 os.makedirs(settings.data_dir, exist_ok=True)
 os.makedirs(settings.browser_profile_dir, exist_ok=True)
+os.makedirs(settings.workspace_dir, exist_ok=True)

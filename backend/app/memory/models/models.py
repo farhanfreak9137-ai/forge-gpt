@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.utils.clock import utcnow
 from typing import Optional, Any, Dict, List
 import uuid
 
@@ -29,8 +30,8 @@ class Project(Base):
     name = Column(String(255), nullable=False, index=True)
     path = Column(String(1024), nullable=False, unique=True)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     project_metadata = Column(JSON, default=dict)
 
     sessions = relationship("ProjectSession", back_populates="project", cascade="all, delete-orphan")
@@ -44,7 +45,7 @@ class ProjectSession(Base):
     project_id = Column(String(36), ForeignKey("projects.id"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     status = Column(String(50), default="active", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     project = relationship("Project", back_populates="sessions")
     tasks = relationship("Task", back_populates="session", cascade="all, delete-orphan")
@@ -64,8 +65,8 @@ class Task(Base):
     max_repair_attempts = Column(Integer, default=4, nullable=False)
     error_message = Column(Text, nullable=True)
     result_summary = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     project = relationship("Project", back_populates="tasks")
     session = relationship("ProjectSession", back_populates="tasks")
@@ -90,7 +91,7 @@ class TaskStep(Base):
     status = Column(String(50), default="PENDING", nullable=False)  # PENDING, RUNNING, COMPLETED, FAILED, SKIPPED
     input_payload = Column(JSON, default=dict)
     output_payload = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
     task = relationship("Task", back_populates="steps")
@@ -124,7 +125,7 @@ class AIRequestRecord(Base):
     status = Column(String(50), default="SUCCESS", nullable=False)
     tokens_used = Column(Integer, default=0)
     duration_ms = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     task = relationship("Task", back_populates="ai_requests")
 
@@ -141,7 +142,7 @@ class ProposedChangeRecord(Base):
     patch_diff = Column(Text, nullable=True)
     explanation = Column(Text, nullable=True)
     status = Column(String(50), default="PENDING", nullable=False)  # PENDING, APPLIED, REJECTED, FAILED
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     task = relationship("Task", back_populates="proposed_changes")
 
@@ -159,7 +160,7 @@ class ExecutionRecord(Base):
     execution_mode = Column(String(50), default="native", nullable=False)
     duration_ms = Column(Integer, default=0)
     status = Column(String(50), default="COMPLETED", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     task = relationship("Task", back_populates="executions")
 
@@ -174,7 +175,7 @@ class TestResultRecord(Base):
     total_tests = Column(Integer, default=0)
     failed_tests = Column(Integer, default=0)
     error_details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     task = relationship("Task", back_populates="test_results")
 
@@ -189,7 +190,7 @@ class ApprovalRequestRecord(Base):
     details_json = Column(JSON, default=dict)
     status = Column(String(50), default="PENDING", nullable=False)  # PENDING, APPROVED, REJECTED
     decision_reason = Column(Text, nullable=True)
-    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_at = Column(DateTime, default=utcnow, nullable=False)
     decided_at = Column(DateTime, nullable=True)
 
     task = relationship("Task", back_populates="approvals")
@@ -203,7 +204,7 @@ class CheckpointRecord(Base):
     git_ref = Column(String(100), nullable=False)
     description = Column(Text, nullable=False)
     files_affected_json = Column(JSON, default=list)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     task = relationship("Task", back_populates="checkpoints")
 
@@ -219,7 +220,7 @@ class ActivityEventRecord(Base):
     severity = Column(String(20), default="INFO", nullable=False)  # INFO, WARNING, ERROR, SUCCESS
     message = Column(Text, nullable=False)
     payload_json = Column(JSON, default=dict)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AppSetting(Base):
@@ -227,5 +228,5 @@ class AppSetting(Base):
 
     key = Column(String(100), primary_key=True)
     value_json = Column(JSON, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
