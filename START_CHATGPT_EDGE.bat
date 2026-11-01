@@ -10,6 +10,11 @@ echo.
 if not exist "backend\.venv\Scripts\python.exe" (
     echo [Error] Python environment not found. Running setup...
     powershell -ExecutionPolicy Bypass -File "scripts\setup.ps1"
+    if errorlevel 1 (
+        echo [Error] Setup failed. See the messages above.
+        pause
+        exit /b 1
+    )
 )
 
 backend\.venv\Scripts\python.exe scripts\chat_edge.py
