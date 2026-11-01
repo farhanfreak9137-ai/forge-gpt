@@ -1,435 +1,666 @@
-import React, { useEffect, useState } from 'react';
-import { Play, Pause, XCircle, RotateCcw, CheckCircle, AlertTriangle, FileCode, CheckSquare, Activity, ShieldAlert, Cpu } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Bot,
+  Check,
+  CheckCircle2,
+  Circle,
+  CircleAlert,
+  CircleDot,
+  EllipsisVertical,
+  FileCode,
+  ListChecks,
+  Loader2,
+  Pause,
+  Play,
+  ShieldAlert,
+  Trash2,
+  XCircle,
+} from 'lucide-react';
 import { api } from '../../services/api';
 import { wsClient } from '../../services/websocket';
+import { cn } from '../../lib/cn';
+import { detectLanguage, formatDateTime, relativeTime, splitPath } from '../../lib/format';
+import { useDocumentTitle, useMediaQuery } from '../../lib/hooks';
+import { PHASES, isTerminal, stateInfo, taskPhase } from '../../lib/taskState';
+import { ActivityEvent, Approval, PlanStep, ProposedChange, Task, TaskDetail } from '../../types';
 import { useAppStore } from '../../stores/useAppStore';
-import { TaskDetail, ActivityEvent, ProposedChange, Approval } from '../../types';
 import { MonacoEditorView } from '../../components/editor/MonacoEditorView';
-import { MonacoDiffView } from '../../components/editor/MonacoDiffView';
+import { Page } from '../../components/layout/AppShell';
+import {
+  Badge,
+  Button,
+  Card,
+  CodeBlock,
+  CopyButton,
+  EmptyState,
+  Field,
+  IconButton,
+  Input,
+  Mascot,
+  Menu,
+  Skeleton,
+  StateBadge,
+  useCelebration,
+  useConfirm,
+  useToast,
+} from '../../components/ui';
+import type { Mood } from '../../components/ui';
+
+type Tab = 'overview' | 'changes' | 'tests' | 'events';
+
+/* ---------- progress stepper ---------- */
+
+const Stepper: React.FC<{ task: TaskDetail }> = ({ task }) => {
+  const phase = taskPhase(task);
+  const info = stateInfo(task.state);
+  const failed = task.state === 'FAILED' || task.state === 'CANCELLED';
+  return (
+    <ol aria-label="Task progress" className="flex items-center gap-1 overflow-x-auto pb-1 text-xs sm:gap-2">
+      {PHASES.map((name, i) => {
+        const done = i < phase || task.state === 'COMPLETED';
+        const current = i === phase && task.state !== 'COMPLETED';
+        return (
+          <React.Fragment key={name}>
+            <li
+              aria-current={current ? 'step' : undefined}
+              className={cn(
+                'flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 font-medium',
+                done && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+                current && !failed && !info.needsYou && 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+                current && info.needsYou && 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+                current && failed && 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+                !done && !current && 'border-slate-800 text-slate-500',
+              )}
+            >
+              {done ? (
+                <Check className="h-3.5 w-3.5" aria-hidden />
+              ) : current && info.running ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : current ? (
+                <CircleDot className="h-3.5 w-3.5" aria-hidden />
+              ) : (
+                <Circle className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {name}
+            </li>
+            {i < PHASES.length - 1 && <span className={cn('h-px w-3 shrink-0 sm:w-6', done ? 'bg-emerald-500/40' : 'bg-slate-800')} aria-hidden />}
+          </React.Fragment>
+        );
+      })}
+    </ol>
+  );
+};
+
+const STEP_ICON: Record<PlanStep['status'], React.ReactNode> = {
+  PENDING: <Circle className="h-4 w-4 text-slate-500" aria-label="Pending" />,
+  RUNNING: <Loader2 className="h-4 w-4 animate-spin text-sky-400" aria-label="Running" />,
+  COMPLETED: <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-label="Done" />,
+  FAILED: <XCircle className="h-4 w-4 text-rose-400" aria-label="Failed" />,
+  SKIPPED: <Circle className="h-4 w-4 text-slate-600" aria-label="Skipped" />,
+};
+
+const OP_TONE: Record<string, 'success' | 'info' | 'danger' | 'neutral'> = {
+  create: 'success',
+  replace: 'info',
+  patch: 'info',
+  delete: 'danger',
+  move: 'neutral',
+};
+
+function moodFor(state: string): Mood {
+  const info = stateInfo(state);
+  if (state === 'COMPLETED') return 'happy';
+  if (state === 'FAILED' || info.needsYou) return 'alert';
+  if (state === 'CANCELLED') return 'sleeping';
+  return info.running ? 'thinking' : 'idle';
+}
+
+/* ---------- page ---------- */
 
 export const TaskWorkspacePage: React.FC = () => {
-  const { activeTask, setActiveTask, addEvent, events } = useAppStore();
-  const [selectedChange, setSelectedChange] = useState<ProposedChange | null>(null);
-  const [activeTab, setActiveTab] = useState<'plan' | 'diff' | 'tests' | 'events'>('plan');
-  const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([]);
-  const [approvalReason, setApprovalReason] = useState('');
-  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const { activeTask, activeTaskId, setActiveTask } = useAppStore();
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
 
-  // Poll / refresh active task details
-  const refreshTask = async () => {
-    if (!activeTask?.id) return;
+  const [tab, setTab] = useState<Tab>('overview');
+  const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [reason, setReason] = useState('');
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const [taskEvents, setTaskEvents] = useState<ActivityEvent[]>([]);
+  const [recent, setRecent] = useState<Task[] | null>(null);
+  const [restoring, setRestoring] = useState(!activeTask && !!activeTaskId);
+
+  const pendingCount = approvals.length;
+  useDocumentTitle(activeTask ? (pendingCount ? `(${pendingCount}) ${activeTask.title}` : activeTask.title) : 'Tasks');
+
+  const taskId = activeTask?.id;
+
+  const refreshTask = useCallback(async () => {
+    if (!taskId) return;
     try {
-      const updated = await api.getTask(activeTask.id);
-      setActiveTask(updated);
-      if (updated.proposed_changes?.length > 0 && !selectedChange) {
-        setSelectedChange(updated.proposed_changes[0]);
-      }
+      setActiveTask(await api.getTask(taskId));
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [taskId, setActiveTask]);
 
-  const loadApprovals = async () => {
+  const loadApprovals = useCallback(async () => {
+    if (!taskId) return;
     try {
       const data = await api.getApprovals();
-      setPendingApprovals(data.filter((a) => a.task_id === activeTask?.id && a.status === 'PENDING'));
+      setApprovals(data.filter((a) => a.task_id === taskId && a.status === 'PENDING'));
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [taskId]);
 
+  // After a reload the in-memory task is gone: restore the one that was open (drop it if deleted)
   useEffect(() => {
+    if (activeTask || !activeTaskId) {
+      setRestoring(false);
+      return;
+    }
+    api
+      .getTask(activeTaskId)
+      .then(setActiveTask)
+      .catch(() => setActiveTask(null))
+      .finally(() => setRestoring(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Recent tasks for the empty state
+  useEffect(() => {
+    if (activeTask || restoring) return;
+    api.getTasks().then(setRecent).catch(() => setRecent([]));
+  }, [activeTask, restoring]);
+
+  // Live updates: websocket, plus a slow poll while the task is still moving
+  useEffect(() => {
+    if (!taskId) return;
     refreshTask();
     loadApprovals();
+    setTaskEvents([]);
+    api.getEvents({ taskId }).then((evs) => setTaskEvents([...evs].sort((a, b) => b.timestamp.localeCompare(a.timestamp)))).catch(() => undefined);
 
-    // Subscribe to live WebSocket events
     const unsubscribe = wsClient.subscribe((event: ActivityEvent) => {
-      addEvent(event);
-      if (event.task_id === activeTask?.id) {
-        refreshTask();
-        loadApprovals();
-      }
-    });
-
-    const interval = setInterval(() => {
+      if (event.task_id !== taskId) return;
+      setTaskEvents((prev) => (prev.some((e) => e.id === event.id) ? prev : [event, ...prev].slice(0, 300)));
       refreshTask();
       loadApprovals();
-    }, 3000);
+    });
+    const interval = setInterval(() => {
+      const state = useAppStore.getState().activeTask?.state;
+      if (state && isTerminal(state)) return;
+      refreshTask();
+      loadApprovals();
+    }, 5000);
 
     return () => {
       unsubscribe();
       clearInterval(interval);
     };
-  }, [activeTask?.id]);
+  }, [taskId, refreshTask, loadApprovals]);
 
-  if (!activeTask) {
+  // Celebrate when the task we are watching finishes
+  const celebrate = useCelebration((s) => s.celebrate);
+  const seen = useRef<{ id?: string; state?: string }>({});
+  useEffect(() => {
+    const prev = seen.current;
+    if (activeTask && prev.id === activeTask.id && prev.state && prev.state !== 'COMPLETED' && activeTask.state === 'COMPLETED') {
+      celebrate();
+      toast.success('Task complete! Nicely done \u{1F389}');
+    }
+    seen.current = { id: activeTask?.id, state: activeTask?.state };
+  }, [activeTask?.id, activeTask?.state, celebrate, toast]);
+
+  const changes = activeTask?.proposed_changes ?? [];
+  const selectedChange = useMemo<ProposedChange | null>(
+    () => changes.find((c) => c.id === selectedChangeId) ?? changes[0] ?? null,
+    [changes, selectedChangeId],
+  );
+
+  /* ---------- empty / loading states ---------- */
+
+  if (restoring) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center text-slate-500">
-        <Activity className="w-12 h-12 text-slate-600 mb-4" />
-        <h2 className="text-lg font-semibold text-slate-300">No Task Active</h2>
-        <p className="text-sm text-slate-500 max-w-sm mt-1">
-          Select or launch a development task from the Projects page to monitor execution.
-        </p>
-      </div>
+      <Page>
+        <Skeleton className="h-20 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </Page>
     );
   }
 
-  const handlePause = async () => {
-    await api.pauseTask(activeTask.id);
-    refreshTask();
-  };
+  if (!activeTask) {
+    return (
+      <Page width="md">
+        <EmptyState
+          icon={<ListChecks className="h-6 w-6" />}
+          title="No task selected"
+          description="Tasks are jobs you give the agent on a project. Pick a recent one, or start a new task from Projects."
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="primary" onClick={() => navigate('/projects')}>
+                Start a task
+              </Button>
+              <Button icon={<Bot className="h-4 w-4" />} onClick={() => navigate('/')}>
+                Chat in Studio
+              </Button>
+            </div>
+          }
+        />
+        {recent && recent.length > 0 && (
+          <Card>
+            <h2 className="border-b border-slate-800 px-4 py-3 text-sm font-semibold text-slate-200">Recent tasks</h2>
+            <ul className="divide-y divide-slate-800">
+              {recent.slice(0, 8).map((t) => (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        setActiveTask(await api.getTask(t.id));
+                      } catch (e: any) {
+                        toast.error(`Could not open that task: ${e.message}`);
+                      }
+                    }}
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-800/50"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium text-slate-100">{t.title}</span>
+                      <span className="text-xs text-slate-400">{relativeTime(t.created_at)}</span>
+                    </span>
+                    <StateBadge state={t.state} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
+      </Page>
+    );
+  }
 
-  const handleResume = async () => {
-    await api.resumeTask(activeTask.id);
-    refreshTask();
+  /* ---------- actions ---------- */
+
+  const info = stateInfo(activeTask.state);
+  const finished = isTerminal(activeTask.state);
+
+  const run = async (fn: () => Promise<unknown>, okMsg?: string) => {
+    try {
+      await fn();
+      if (okMsg) toast.success(okMsg);
+      await refreshTask();
+    } catch (e: any) {
+      toast.error(e.message || 'That did not work.');
+    }
   };
 
   const handleCancel = async () => {
-    if (confirm('Are you sure you want to cancel this task?')) {
-      await api.cancelTask(activeTask.id);
-      refreshTask();
+    const ok = await confirm({
+      title: 'Cancel this task?',
+      message: 'The agent stops working on it. Changes already applied stay in your project.',
+      confirmLabel: 'Cancel task',
+      cancelLabel: 'Keep running',
+      tone: 'danger',
+    });
+    if (ok) run(() => api.cancelTask(activeTask.id), 'Task cancelled.');
+  };
+
+  const handleDelete = async () => {
+    const ok = await confirm({
+      title: 'Delete this task?',
+      message: 'The task and its history are removed. Files already written to your project are not touched.',
+      confirmLabel: 'Delete task',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await api.deleteTask(activeTask.id);
+      setActiveTask(null);
+      toast.success('Task deleted.');
+    } catch (e: any) {
+      toast.error(`Could not delete the task: ${e.message}`);
     }
   };
 
-  const handleDecideApproval = async (approvalId: string, approved: boolean) => {
+  const decide = async (approvalId: string, approved: boolean) => {
+    setDeciding(approvalId);
     try {
-      await api.decideApproval(approvalId, approved, approvalReason);
-      setApprovalReason('');
-      await loadApprovals();
-      await refreshTask();
+      await api.decideApproval(approvalId, approved, reason);
+      setReason('');
+      await Promise.all([loadApprovals(), refreshTask()]);
+      toast.success(approved ? 'Approved. The task continues.' : 'Rejected. The task was stopped.');
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e.message || 'Could not record your decision.');
+    } finally {
+      setDeciding(null);
     }
   };
+
+  /* ---------- panels ---------- */
+
+  const planPanel = (
+    <div className="space-y-6">
+      <section aria-label="Plan">
+        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-200">
+          <ListChecks className="h-4 w-4 text-brand-400" aria-hidden /> Plan
+        </h2>
+        {activeTask.steps?.length ? (
+          <ol className="space-y-2">
+            {activeTask.steps.map((s) => (
+              <li key={s.id} className="flex gap-2.5 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                {/* The plan rows are not always updated by the backend: a completed task has no pending steps */}
+                <span className="mt-0.5 shrink-0">
+                  {STEP_ICON[activeTask.state === 'COMPLETED' && s.status === 'PENDING' ? 'COMPLETED' : s.status] ?? STEP_ICON.PENDING}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-slate-100">{s.title}</span>
+                  {s.description && <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">{s.description}</span>}
+                </span>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-sm text-slate-400">{finished ? 'No plan was recorded.' : 'The agent is still working out a plan.'}</p>
+        )}
+      </section>
+
+      <section aria-label="Changed files">
+        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-200">
+          <FileCode className="h-4 w-4 text-sky-400" aria-hidden /> Changed files ({changes.length})
+        </h2>
+        {changes.length === 0 ? (
+          <p className="text-sm text-slate-400">No files changed yet.</p>
+        ) : (
+          <ul className="space-y-1">
+            {changes.map((ch) => (
+              <li key={ch.id}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedChangeId(ch.id);
+                    setTab('changes');
+                  }}
+                  className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left font-mono text-[13px] text-slate-300 transition-colors hover:bg-slate-800"
+                >
+                  <span className="truncate" title={ch.file_path}>
+                    {ch.file_path}
+                  </span>
+                  <Badge tone={OP_TONE[ch.operation] ?? 'neutral'}>{ch.operation}</Badge>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs text-slate-300">
+        <span>Fix attempts</span>
+        <span className="font-mono font-semibold text-slate-100">
+          {activeTask.repair_attempts} / {activeTask.max_repair_attempts}
+        </span>
+      </div>
+    </div>
+  );
+
+  const tabs: Array<{ id: Tab; label: string; count?: number }> = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'changes', label: 'Changes', count: changes.length },
+    { id: 'tests', label: 'Tests', count: activeTask.test_results?.length ?? 0 },
+    { id: 'events', label: 'Events', count: taskEvents.length },
+  ];
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden bg-slate-950">
-      {/* Task Top Control Bar */}
-      <div className="border-b border-slate-800 bg-slate-900/80 px-6 py-3 flex items-center justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-base font-bold text-slate-100">{activeTask.title}</h1>
-            <span
-              className={`text-xs px-2.5 py-0.5 rounded-full font-mono font-bold tracking-wide uppercase ${
-                activeTask.state === 'COMPLETED'
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                  : activeTask.state === 'FAILED'
-                  ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-                  : activeTask.state === 'WAITING_FOR_APPROVAL'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
-                  : 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
-              }`}
-            >
-              {activeTask.state}
-            </span>
-          </div>
-          <div className="text-xs text-slate-400 font-mono truncate max-w-2xl">{activeTask.description}</div>
-        </div>
-
-        {/* Task Control Buttons */}
-        <div className="flex items-center gap-2">
-          {activeTask.state === 'PAUSED' ? (
-            <button
-              onClick={handleResume}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>Resume</span>
-            </button>
-          ) : (
-            !['COMPLETED', 'FAILED', 'CANCELLED'].includes(activeTask.state) && (
-              <button
-                onClick={handlePause}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-500/30 rounded text-xs font-semibold"
-              >
-                <Pause className="w-3.5 h-3.5" />
-                <span>Pause</span>
-              </button>
-            )
-          )}
-          {!['COMPLETED', 'FAILED', 'CANCELLED'].includes(activeTask.state) && (
-            <button
-              onClick={handleCancel}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 border border-rose-800 rounded text-xs font-semibold"
-            >
-              <XCircle className="w-3.5 h-3.5" />
-              <span>Cancel</span>
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Pending Approval Gate Alert */}
-      {pendingApprovals.length > 0 && (
-        <div className="bg-amber-950/70 border-b border-amber-600/40 px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <ShieldAlert className="w-5 h-5 text-amber-400 animate-pulse" />
-            <div>
-              <div className="text-xs font-bold text-amber-300 uppercase tracking-wide">Approval Required by Policy</div>
-              <div className="text-xs text-amber-200">{pendingApprovals[0].description}</div>
+    <div className="flex h-full flex-col overflow-hidden bg-slate-950">
+      {/* Header */}
+      <div className="shrink-0 space-y-3 border-b border-slate-800 bg-slate-900/60 px-4 py-4 sm:px-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-3">
+              <Mascot mood={moodFor(activeTask.state)} size={38} />
+              <h1 className="text-lg font-semibold text-slate-50">{activeTask.title}</h1>
+              <StateBadge state={activeTask.state} />
             </div>
+            {info.hint && <p className="text-sm text-slate-300">{info.hint}</p>}
+            {activeTask.description && <p className="line-clamp-2 max-w-3xl text-sm text-slate-400">{activeTask.description}</p>}
           </div>
           <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Reason or notes..."
-              value={approvalReason}
-              onChange={(e) => setApprovalReason(e.target.value)}
-              className="text-xs bg-slate-900 border border-amber-700/60 rounded px-2.5 py-1 text-slate-200 placeholder-slate-500"
-            />
-            <button
-              onClick={() => handleDecideApproval(pendingApprovals[0].id, false)}
-              className="px-3 py-1 bg-rose-900 hover:bg-rose-800 text-rose-100 rounded text-xs font-semibold"
-            >
-              Reject
-            </button>
-            <button
-              onClick={() => handleDecideApproval(pendingApprovals[0].id, true)}
-              className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold"
-            >
-              Approve
-            </button>
+            {activeTask.state === 'PAUSED' ? (
+              <Button variant="primary" icon={<Play className="h-4 w-4" />} onClick={() => run(() => api.resumeTask(activeTask.id), 'Task resumed.')}>
+                Resume
+              </Button>
+            ) : (
+              !finished && (
+                <Button variant="warning" icon={<Pause className="h-4 w-4" />} onClick={() => run(() => api.pauseTask(activeTask.id), 'Task paused.')}>
+                  Pause
+                </Button>
+              )
+            )}
+            {!finished && (
+              <Button variant="secondary" icon={<XCircle className="h-4 w-4" />} onClick={handleCancel}>
+                Cancel task
+              </Button>
+            )}
+            {finished && (
+              <Menu
+                trigger={(p) => (
+                  <IconButton label="Task options" {...p}>
+                    <EllipsisVertical className="h-4 w-4" />
+                  </IconButton>
+                )}
+                items={[{ label: 'Delete task…', icon: <Trash2 className="h-4 w-4" />, danger: true, onSelect: handleDelete }]}
+              />
+            )}
           </div>
         </div>
+        <Stepper task={activeTask} />
+      </div>
+
+      {/* Approvals */}
+      {approvals.length > 0 && (
+        <section aria-label="Approvals" className="shrink-0 space-y-3 border-b border-amber-500/40 bg-amber-950/60 px-4 py-4 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-amber-100">
+              <ShieldAlert className="h-4 w-4 text-amber-300" aria-hidden />
+              {approvals.length === 1 ? 'The agent needs your approval' : `${approvals.length} approvals needed`}
+            </h2>
+            <div className="w-full sm:w-72">
+              <Field label="Note (optional)" htmlFor="approval-note" className="space-y-1">
+                <Input id="approval-note" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why you approved or rejected" className="h-9" />
+              </Field>
+            </div>
+          </div>
+          {approvals.map((a) => (
+            <div key={a.id} className="space-y-3 rounded-xl border border-amber-500/30 bg-slate-950/60 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone="warning">{a.action_type.replace(/_/g, ' ').toLowerCase()}</Badge>
+                <span className="text-xs text-slate-400">requested {relativeTime(a.requested_at)}</span>
+              </div>
+              <p className="text-sm text-slate-100">{a.description}</p>
+              {a.details && Object.keys(a.details).length > 0 && (
+                <details className="text-sm">
+                  <summary className="cursor-pointer text-xs font-medium text-slate-300 hover:text-slate-50">Show details</summary>
+                  <CodeBlock code={JSON.stringify(a.details, null, 2)} language="json" className="mt-2" maxHeight="14rem" />
+                </details>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button variant="primary" loading={deciding === a.id} disabled={!!deciding} onClick={() => decide(a.id, true)}>
+                  Approve
+                </Button>
+                <Button variant="secondary" disabled={!!deciding} onClick={() => decide(a.id, false)}>
+                  Reject &amp; stop
+                </Button>
+              </div>
+            </div>
+          ))}
+        </section>
       )}
 
-      {/* Multi-Panel Workspace Layout */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left Side: Plan, Steps & Changes List */}
-        <div className="w-80 border-r border-slate-800 bg-slate-900/40 flex flex-col justify-between">
-          <div className="overflow-y-auto p-4 space-y-6">
-            {/* Plan Steps */}
-            <div>
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
-                <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Plan & Milestones</span>
-              </h2>
-              {activeTask.steps?.length === 0 ? (
-                <div className="text-xs text-slate-500 italic">Formulating plan with AI...</div>
-              ) : (
-                <div className="space-y-2">
-                  {activeTask.steps.map((step) => (
-                    <div
-                      key={step.id}
-                      className="p-2.5 rounded bg-slate-850 border border-slate-800 text-xs space-y-1"
-                    >
-                      <div className="flex items-center justify-between font-semibold text-slate-200">
-                        <span>{step.step_index}. {step.title}</span>
-                      </div>
-                      <p className="text-slate-400 text-[11px]">{step.description}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+      {/* Body */}
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {isDesktop && <aside aria-label="Plan and files" className="w-80 shrink-0 overflow-y-auto border-r border-slate-800 bg-slate-900/40 p-4">{planPanel}</aside>}
 
-            {/* Proposed File Changes */}
-            <div>
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
-                <FileCode className="w-3.5 h-3.5 text-blue-400" />
-                <span>Modified Files ({activeTask.proposed_changes?.length || 0})</span>
-              </h2>
-              {activeTask.proposed_changes?.length === 0 ? (
-                <div className="text-xs text-slate-500 italic">No files modified yet.</div>
-              ) : (
-                <div className="space-y-1.5 font-mono text-xs">
-                  {activeTask.proposed_changes.map((ch) => (
-                    <div
-                      key={ch.id}
-                      onClick={() => {
-                        setSelectedChange(ch);
-                        setActiveTab('diff');
-                      }}
-                      className={`p-2 rounded cursor-pointer transition-colors flex items-center justify-between ${
-                        selectedChange?.id === ch.id
-                          ? 'bg-emerald-950/60 border border-emerald-500/40 text-emerald-300'
-                          : 'bg-slate-850 hover:bg-slate-800 text-slate-300 border border-slate-800'
-                      }`}
-                    >
-                      <span className="truncate">{ch.file_path}</span>
-                      <span className="text-[10px] uppercase font-bold text-slate-500">{ch.operation}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div role="tablist" aria-label="Task details" className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-800 bg-slate-900/40 px-3">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                role="tab"
+                type="button"
+                aria-selected={tab === t.id}
+                onClick={() => setTab(t.id)}
+                className={cn(
+                  'flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm font-medium transition-colors',
+                  tab === t.id ? 'border-brand-500 text-brand-300' : 'border-transparent text-slate-400 hover:text-slate-100',
+                )}
+              >
+                {t.label}
+                {!!t.count && <span className="rounded-full bg-slate-800 px-1.5 text-xs text-slate-300">{t.count}</span>}
+              </button>
+            ))}
           </div>
 
-          {/* Repair attempt indicator */}
-          <div className="p-3 border-t border-slate-800 text-xs text-slate-400 flex items-center justify-between bg-slate-900">
-            <span>Repair Iterations:</span>
-            <span className="font-mono font-bold text-slate-200">
-              {activeTask.repair_attempts} / {activeTask.max_repair_attempts}
-            </span>
-          </div>
-        </div>
-
-        {/* Center / Right: Tabbed Details (Diff View, Test Results, Live Logs) */}
-        <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-          {/* Tabs Header */}
-          <div className="flex items-center border-b border-slate-800 bg-slate-900/50 px-4 text-xs font-medium">
-            <button
-              onClick={() => setActiveTab('plan')}
-              className={`py-2.5 px-4 border-b-2 transition-colors ${
-                activeTab === 'plan'
-                  ? 'border-emerald-500 text-emerald-400 font-semibold'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Task Overview
-            </button>
-            <button
-              onClick={() => setActiveTab('diff')}
-              className={`py-2.5 px-4 border-b-2 transition-colors ${
-                activeTab === 'diff'
-                  ? 'border-emerald-500 text-emerald-400 font-semibold'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Diff & Code Inspector
-            </button>
-            <button
-              onClick={() => setActiveTab('tests')}
-              className={`py-2.5 px-4 border-b-2 transition-colors ${
-                activeTab === 'tests'
-                  ? 'border-emerald-500 text-emerald-400 font-semibold'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Verification & Tests ({activeTask.test_results?.length || 0})
-            </button>
-            <button
-              onClick={() => setActiveTab('events')}
-              className={`py-2.5 px-4 border-b-2 transition-colors ${
-                activeTab === 'events'
-                  ? 'border-emerald-500 text-emerald-400 font-semibold'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Live Event Stream
-            </button>
-          </div>
-
-          {/* Tab Content Panels */}
-          <div className="flex-1 p-6 overflow-y-auto">
-            {activeTab === 'plan' && (
-              <div className="space-y-6 max-w-3xl">
-                <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-slate-200">Execution Summary</h3>
-                  <p className="text-sm text-slate-300">
-                    {activeTask.result_summary || 'Task is currently processing through the orchestration pipeline.'}
+          <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+            {tab === 'overview' && (
+              <div className="max-w-3xl space-y-5">
+                <Card className="space-y-3 p-5">
+                  <h2 className="text-sm font-semibold text-slate-100">Result</h2>
+                  <p className="text-sm leading-relaxed text-slate-300">
+                    {activeTask.result_summary || (finished ? 'No summary was recorded.' : 'The task is still running. Results appear here when it finishes.')}
                   </p>
                   {activeTask.error_message && (
-                    <div className="bg-rose-950/50 border border-rose-800 p-3 rounded text-xs text-rose-300 font-mono">
+                    <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-950/30 p-3 font-mono text-xs leading-relaxed text-rose-200">
                       {activeTask.error_message}
                     </div>
                   )}
-                </div>
+                </Card>
 
-                <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-slate-200">Git Checkpoints ({activeTask.checkpoints?.length || 0})</h3>
-                  {activeTask.checkpoints?.length === 0 ? (
-                    <p className="text-xs text-slate-500">No checkpoints recorded yet.</p>
-                  ) : (
-                    <div className="space-y-2 font-mono text-xs">
+                <Card className="space-y-3 p-5">
+                  <h2 className="text-sm font-semibold text-slate-100">Checkpoints ({activeTask.checkpoints?.length ?? 0})</h2>
+                  {activeTask.checkpoints?.length ? (
+                    <ul className="space-y-2">
                       {activeTask.checkpoints.map((cp) => (
-                        <div key={cp.id} className="p-2.5 bg-slate-950 border border-slate-800 rounded flex items-center justify-between">
-                          <div>
-                            <span className="text-emerald-400 font-bold">{cp.git_ref.slice(0, 7)}</span>
-                            <span className="text-slate-300 ml-2">{cp.description}</span>
-                          </div>
-                          <span className="text-slate-500 text-[11px]">{new Date(cp.created_at).toLocaleTimeString()}</span>
-                        </div>
+                        <li key={cp.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm">
+                          <span className="min-w-0">
+                            <span className="font-mono font-semibold text-brand-300">{cp.git_ref.slice(0, 7)}</span>
+                            <span className="ml-2 text-slate-300">{cp.description}</span>
+                          </span>
+                          <span className="text-xs text-slate-400">{formatDateTime(cp.created_at)}</span>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-slate-400">Git checkpoints are saved here as the agent works, so you can roll back.</p>
                   )}
-                </div>
+                </Card>
+
+                {!isDesktop && <Card className="p-5">{planPanel}</Card>}
               </div>
             )}
 
-            {activeTab === 'diff' && (
-              <div className="h-full flex flex-col space-y-3">
-                {selectedChange ? (
-                  <>
-                    <div className="flex items-center justify-between text-xs text-slate-400 bg-slate-900 p-2 rounded border border-slate-800">
-                      <span>Viewing: <strong className="text-slate-100 font-mono">{selectedChange.file_path}</strong></span>
-                      <span className="text-slate-400">{selectedChange.explanation}</span>
-                    </div>
-                    <div className="flex-1 min-h-[400px]">
-                      {selectedChange.patch_diff ? (
-                        <MonacoEditorView
-                          value={selectedChange.patch_diff}
-                          language="diff"
-                          readOnly={true}
-                        />
-                      ) : (
-                        <MonacoEditorView
-                          value={selectedChange.proposed_content || ''}
-                          language="python"
-                          readOnly={true}
-                        />
-                      )}
-                    </div>
-                  </>
+            {tab === 'changes' && (
+              <div className="flex h-full min-h-[24rem] flex-col gap-3">
+                {changes.length === 0 ? (
+                  <EmptyState icon={<FileCode className="h-6 w-6" />} title="No file changes yet" description="Files the agent proposes or writes will be listed here with their diff." />
                 ) : (
-                  <div className="text-sm text-slate-500 text-center py-12">
-                    Select a modified file from the left panel to inspect proposed changes.
-                  </div>
+                  <>
+                    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Changed files">
+                      {changes.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          aria-pressed={selectedChange?.id === c.id}
+                          onClick={() => setSelectedChangeId(c.id)}
+                          className={cn(
+                            'max-w-full truncate rounded-lg border px-3 py-1.5 font-mono text-xs transition-colors',
+                            selectedChange?.id === c.id ? 'border-brand-500/50 bg-brand-500/10 text-brand-200' : 'border-slate-800 text-slate-300 hover:border-slate-600',
+                          )}
+                          title={c.file_path}
+                        >
+                          {splitPath(c.file_path).name}
+                        </button>
+                      ))}
+                    </div>
+                    {selectedChange && (
+                      <>
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+                          <span className="min-w-0 truncate font-mono text-slate-100" title={selectedChange.file_path}>
+                            {selectedChange.file_path}
+                          </span>
+                          <span className="flex items-center gap-2">
+                            <Badge tone={OP_TONE[selectedChange.operation] ?? 'neutral'}>{selectedChange.operation}</Badge>
+                            <Badge tone={selectedChange.status === 'APPLIED' ? 'success' : selectedChange.status === 'FAILED' ? 'danger' : 'neutral'}>
+                              {selectedChange.status.toLowerCase()}
+                            </Badge>
+                            <CopyButton text={selectedChange.patch_diff || selectedChange.proposed_content || ''} />
+                          </span>
+                        </div>
+                        {selectedChange.explanation && <p className="text-sm text-slate-300">{selectedChange.explanation}</p>}
+                        <div className="min-h-[22rem] flex-1">
+                          <MonacoEditorView
+                            value={selectedChange.patch_diff || selectedChange.proposed_content || ''}
+                            language={selectedChange.patch_diff ? 'diff' : detectLanguage(selectedChange.file_path)}
+                            readOnly
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
                 )}
               </div>
             )}
 
-            {activeTab === 'tests' && (
-              <div className="space-y-4 max-w-4xl">
-                {activeTask.test_results?.length === 0 ? (
-                  <div className="text-slate-500 text-sm italic">Verification tests not yet executed.</div>
-                ) : (
+            {tab === 'tests' && (
+              <div className="max-w-4xl space-y-3">
+                {activeTask.test_results?.length ? (
                   activeTask.test_results.map((tr) => (
                     <div
                       key={tr.id}
-                      className={`p-4 rounded-lg border ${
-                        tr.passed
-                          ? 'bg-emerald-950/20 border-emerald-500/30'
-                          : 'bg-rose-950/20 border-rose-500/30'
-                      }`}
+                      className={cn('space-y-3 rounded-xl border p-4', tr.passed ? 'border-emerald-500/30 bg-emerald-950/20' : 'border-rose-500/30 bg-rose-950/20')}
                     >
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-mono text-xs font-bold text-slate-200">{tr.test_command}</span>
-                        <span
-                          className={`text-xs font-bold px-2 py-0.5 rounded ${
-                            tr.passed ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
-                          }`}
-                        >
-                          {tr.passed ? 'PASSED' : 'FAILED'}
-                        </span>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="break-all font-mono text-sm font-medium text-slate-100">{tr.test_command}</span>
+                        <Badge tone={tr.passed ? 'success' : 'danger'}>
+                          {tr.passed ? <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> : <CircleAlert className="h-3.5 w-3.5" aria-hidden />}
+                          {tr.passed ? 'Passed' : 'Failed'}
+                          {tr.total_tests > 0 && ` · ${tr.total_tests - tr.failed_tests}/${tr.total_tests}`}
+                        </Badge>
                       </div>
-                      {tr.error_details && (
-                        <pre className="p-3 bg-slate-950 rounded border border-slate-800 text-xs font-mono text-rose-300 overflow-x-auto max-h-60">
-                          {tr.error_details}
-                        </pre>
-                      )}
+                      {tr.error_details && <CodeBlock code={tr.error_details} language="output" tone="error" maxHeight="16rem" />}
                     </div>
                   ))
+                ) : (
+                  <EmptyState icon={<CheckCircle2 className="h-6 w-6" />} title="No test results yet" description="When the agent runs your checks, the results show up here." />
                 )}
               </div>
             )}
 
-            {activeTab === 'events' && (
-              <div className="space-y-2 font-mono text-xs max-w-4xl">
-                {events
-                  .filter((ev) => ev.task_id === activeTask.id)
-                  .map((ev, i) => (
-                    <div
-                      key={ev.id || i}
-                      className="p-2 rounded bg-slate-900 border border-slate-800 flex items-start justify-between"
-                    >
-                      <div className="space-y-0.5">
-                        <div className="text-slate-400 font-semibold">{ev.event_type}</div>
-                        <div className="text-slate-200">{ev.message}</div>
-                      </div>
-                      <span className="text-[10px] text-slate-500">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                    </div>
-                  ))}
+            {tab === 'events' && (
+              <div className="max-w-4xl">
+                {taskEvents.length === 0 ? (
+                  <EmptyState icon={<Loader2 className="h-6 w-6" />} title="No events yet" description="This list updates live as the agent works." />
+                ) : (
+                  <ul className="space-y-2" aria-live="polite">
+                    {taskEvents.map((ev, i) => (
+                      <li key={ev.id || i} className="flex items-start justify-between gap-3 rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2.5">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge tone={ev.severity === 'ERROR' ? 'danger' : ev.severity === 'WARNING' ? 'warning' : ev.severity === 'SUCCESS' ? 'success' : 'neutral'}>
+                              {ev.severity.toLowerCase()}
+                            </Badge>
+                            <span className="text-xs font-medium text-slate-400">{ev.event_type.replace(/_/g, ' ').toLowerCase()}</span>
+                          </div>
+                          <p className="break-words text-sm text-slate-100">{ev.message}</p>
+                        </div>
+                        <span className="shrink-0 text-xs text-slate-400">{formatDateTime(ev.timestamp)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             )}
           </div>
@@ -438,4 +669,3 @@ export const TaskWorkspacePage: React.FC = () => {
     </div>
   );
 };
-

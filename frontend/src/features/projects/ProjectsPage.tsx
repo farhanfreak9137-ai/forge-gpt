@@ -1,398 +1,358 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FolderGit2, Plus, FolderDown, Terminal, FileCode, CheckCircle2, ChevronRight, X } from 'lucide-react';
+import { ChevronRight, FolderDown, FolderGit2, ListChecks, Plus, Search } from 'lucide-react';
 import { api } from '../../services/api';
-import { Project, Task } from '../../types';
+import { cn } from '../../lib/cn';
+import { formatBytes } from '../../lib/format';
+import { useDocumentTitle } from '../../lib/hooks';
+import { Project } from '../../types';
 import { useAppStore } from '../../stores/useAppStore';
+import { Page } from '../../components/layout/AppShell';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Skeleton, Textarea, useToast } from '../../components/ui';
+
+type ProjectMode = 'create' | 'import';
 
 export const ProjectsPage: React.FC = () => {
+  useDocumentTitle('Projects');
   const navigate = useNavigate();
+  const toast = useToast();
   const { setCurrentProject, setActiveTask } = useAppStore();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProj] = useState<Project | null>(null);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [showTaskModal, setShowTaskModal] = useState(false);
 
-  // Form states
-  const [projectName, setProjectName] = useState('');
-  const [projectPath, setProjectPath] = useState('');
-  const [projectDesc, setProjectDesc] = useState('');
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selected, setSelected] = useState<Project | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [fileFilter, setFileFilter] = useState('');
+  const [projectQuery, setProjectQuery] = useState('');
+
+  // Project dialog (create / import share one form)
+  const [projectMode, setProjectMode] = useState<ProjectMode | null>(null);
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [desc, setDesc] = useState('');
+  const [formError, setFormError] = useState('');
+
+  // Task dialog
+  const [taskOpen, setTaskOpen] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDesc, setTaskDesc] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [taskError, setTaskError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const loadProjects = async () => {
+  const loadProjects = useCallback(async (selectId?: string) => {
+    setLoadError(null);
     try {
       const data = await api.getProjects();
       setProjects(data);
-      if (data.length > 0 && !selectedProject) {
-        setSelectedProj(data[0]);
-      }
-    } catch (e) {
-      console.error(e);
+      setSelected((cur) => data.find((p) => p.id === (selectId ?? cur?.id)) ?? data[0] ?? null);
+    } catch (e: any) {
+      setLoadError(e.message || 'Could not load projects.');
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadProjects();
-  }, []);
+  }, [loadProjects]);
 
-  const handleCreateNew = async (e: React.FormEvent) => {
+  const selectProject = (p: Project) => {
+    setSelected(p);
+    setCurrentProject(p);
+    setFileFilter('');
+  };
+
+  const openProjectDialog = (mode: ProjectMode) => {
+    setName('');
+    setPath('');
+    setDesc('');
+    setFormError('');
+    setProjectMode(mode);
+  };
+
+  const submitProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
+    if (!projectMode) return;
+    setSubmitting(true);
+    setFormError('');
     try {
       const created = await api.createProject({
-        name: projectName,
-        path: projectPath,
-        description: projectDesc,
-        is_new: true,
+        name: name.trim(),
+        path: path.trim(),
+        description: desc.trim(),
+        is_new: projectMode === 'create',
       });
-      setShowCreateModal(false);
-      setProjectName('');
-      setProjectPath('');
-      setProjectDesc('');
-      await loadProjects();
-      setSelectedProj(created);
+      setProjectMode(null);
+      await loadProjects(created.id);
+      setCurrentProject(created);
+      toast.success(projectMode === 'create' ? `Created “${created.name}”.` : `Imported “${created.name}”.`);
     } catch (err: any) {
-      alert(err.message);
+      setFormError(err.message || 'Could not save the project.');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
-  const handleImportExisting = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      const created = await api.createProject({
-        name: projectName,
-        path: projectPath,
-        description: projectDesc,
-        is_new: false,
-      });
-      setShowImportModal(false);
-      setProjectName('');
-      setProjectPath('');
-      setProjectDesc('');
-      await loadProjects();
-      setSelectedProj(created);
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setLoading(false);
-    }
+  const openTaskDialog = () => {
+    setTaskTitle('');
+    setTaskDesc('');
+    setTaskError('');
+    setTaskOpen(true);
   };
 
-  const handleCreateTask = async (e: React.FormEvent) => {
+  const submitTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedProject) return;
-    setLoading(true);
+    if (!selected) return;
+    setSubmitting(true);
+    setTaskError('');
     try {
-      const task = await api.createTask({
-        project_id: selectedProject.id,
-        title: taskTitle,
-        description: taskDesc,
-      });
-      setShowTaskModal(false);
-      setTaskTitle('');
-      setTaskDesc('');
-      setCurrentProject(selectedProject);
-      const detail = await api.getTask(task.id);
-      setActiveTask(detail);
+      const task = await api.createTask({ project_id: selected.id, title: taskTitle.trim(), description: taskDesc.trim() });
+      setTaskOpen(false);
+      setCurrentProject(selected);
+      setActiveTask(await api.getTask(task.id));
       navigate('/workspace');
     } catch (err: any) {
-      alert(err.message);
+      setTaskError(err.message || 'Could not start the task.');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
+  const visibleProjects = projects.filter((p) => `${p.name} ${p.path}`.toLowerCase().includes(projectQuery.trim().toLowerCase()));
+  const files = (selected?.project_metadata?.files ?? []).filter((f) => f.path.toLowerCase().includes(fileFilter.toLowerCase()));
+  const isCreate = projectMode === 'create';
+
   return (
-    <div className="p-8 max-w-7xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-100">Project Management</h1>
-          <p className="text-sm text-slate-400 mt-1">Select, inspect, or initialize project workspaces.</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowImportModal(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-sm font-medium border border-slate-700"
-          >
-            <FolderDown className="w-4 h-4" />
-            <span>Import Existing</span>
-          </button>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Project</span>
-          </button>
-        </div>
-      </div>
+    <Page>
+      <PageHeader
+        title="Projects"
+        description="Pick a project, then give the agent a task to work on."
+        actions={
+          <>
+            <Button icon={<FolderDown className="h-4 w-4" />} onClick={() => openProjectDialog('import')}>
+              Import existing
+            </Button>
+            <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={() => openProjectDialog('create')}>
+              New project
+            </Button>
+          </>
+        }
+      />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Project List */}
-        <div className="space-y-3">
-          {projects.map((proj) => (
-            <div
-              key={proj.id}
-              onClick={() => setSelectedProj(proj)}
-              className={`p-4 rounded-lg border cursor-pointer transition-colors ${
-                selectedProject?.id === proj.id
-                  ? 'bg-slate-850 border-emerald-500/50 shadow-sm'
-                  : 'bg-slate-900 border-slate-800 hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="font-semibold text-slate-200">{proj.name}</div>
-                <ChevronRight className="w-4 h-4 text-slate-500" />
+      {loadError ? (
+        <ErrorState title="Couldn't load projects" message={loadError} onRetry={() => loadProjects()} />
+      ) : loading ? (
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="space-y-3">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-24 w-full" />
+            ))}
+          </div>
+          <Skeleton className="h-72 w-full lg:col-span-2" />
+        </div>
+      ) : projects.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<FolderGit2 className="h-6 w-6" />}
+            title="No projects yet"
+            description="Create a new project folder, or import one you already have. The agent works inside the project you choose."
+            action={
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={() => openProjectDialog('create')}>
+                  New project
+                </Button>
+                <Button icon={<FolderDown className="h-4 w-4" />} onClick={() => openProjectDialog('import')}>
+                  Import existing
+                </Button>
               </div>
-              <div className="text-xs text-slate-400 font-mono mt-1 truncate">{proj.path}</div>
-              <div className="flex gap-2 mt-3">
-                {proj.project_metadata?.languages?.map((lang) => (
-                  <span key={lang} className="text-[10px] bg-slate-800 text-emerald-400 px-1.5 py-0.5 rounded uppercase font-bold">
-                    {lang}
+            }
+          />
+        </Card>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="space-y-3 lg:sticky lg:top-4 lg:self-start">
+          {projects.length > 5 && (
+            <label className="relative block">
+              <span className="sr-only">Search projects</span>
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden />
+              <input
+                type="search"
+                value={projectQuery}
+                onChange={(e) => setProjectQuery(e.target.value)}
+                placeholder={`Search ${projects.length} projects`}
+                className="h-10 w-full rounded-xl border border-slate-700 bg-slate-950 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus-visible:border-brand-500"
+              />
+            </label>
+          )}
+          <ul className="space-y-2 lg:max-h-[calc(100vh-15rem)] lg:overflow-y-auto lg:pr-1" aria-label="Projects">
+            {visibleProjects.length === 0 && <li className="px-2 py-6 text-center text-sm text-slate-400">No project matches “{projectQuery}”.</li>}
+            {visibleProjects.map((p) => (
+              <li key={p.id}>
+                <button
+                  type="button"
+                  onClick={() => selectProject(p)}
+                  aria-current={selected?.id === p.id ? 'true' : undefined}
+                  className={cn(
+                    'w-full rounded-xl border p-4 text-left transition-colors',
+                    selected?.id === p.id ? 'border-brand-500/60 bg-slate-850' : 'border-slate-800 bg-slate-900/70 hover:border-slate-600',
+                  )}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="truncate font-semibold text-slate-100">{p.name}</span>
+                    <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" aria-hidden />
                   </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
+                  <span className="mt-1 block truncate font-mono text-xs text-slate-400">{p.path}</span>
+                  {!!p.project_metadata?.languages?.length && (
+                    <span className="mt-3 flex flex-wrap gap-1.5">
+                      {p.project_metadata.languages.map((l) => (
+                        <Badge key={l} tone="success">
+                          {l}
+                        </Badge>
+                      ))}
+                    </span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+          </div>
 
-        {/* Selected Project Details */}
-        {selectedProject && (
-          <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-lg p-6 space-y-6">
-            <div className="flex items-start justify-between border-b border-slate-800 pb-4">
-              <div>
-                <h2 className="text-xl font-bold text-slate-100">{selectedProject.name}</h2>
-                <p className="text-xs text-slate-400 font-mono mt-1">{selectedProject.path}</p>
-                {selectedProject.description && (
-                  <p className="text-sm text-slate-300 mt-2">{selectedProject.description}</p>
-                )}
+          {selected && (
+            <Card className="space-y-6 p-5 lg:col-span-2 lg:self-start">
+              <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-800 pb-4">
+                <div className="min-w-0">
+                  <h2 className="text-xl font-semibold text-slate-50">{selected.name}</h2>
+                  <p className="mt-1 break-all font-mono text-xs text-slate-400">{selected.path}</p>
+                  {selected.description && <p className="mt-2 text-sm text-slate-300">{selected.description}</p>}
+                </div>
+                <Button variant="primary" icon={<ListChecks className="h-4 w-4" />} onClick={openTaskDialog}>
+                  Start a task
+                </Button>
               </div>
-              <button
-                onClick={() => setShowTaskModal(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-semibold"
-              >
-                <Terminal className="w-4 h-4" />
-                <span>Start Task</span>
-              </button>
-            </div>
 
-            {/* Project Metadata */}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <div className="bg-slate-850 p-3 rounded border border-slate-800">
-                <div className="text-xs text-slate-500 font-semibold uppercase">Frameworks</div>
-                <div className="text-sm text-slate-200 mt-1">
-                  {selectedProject.project_metadata?.frameworks?.join(', ') || 'Standard / None'}
-                </div>
-              </div>
-              <div className="bg-slate-850 p-3 rounded border border-slate-800">
-                <div className="text-xs text-slate-500 font-semibold uppercase">Entry Points</div>
-                <div className="text-sm text-slate-200 mt-1 font-mono text-xs">
-                  {selectedProject.project_metadata?.entry_points?.join(', ') || 'Auto-detected'}
-                </div>
-              </div>
-              <div className="bg-slate-850 p-3 rounded border border-slate-800">
-                <div className="text-xs text-slate-500 font-semibold uppercase">Total Files</div>
-                <div className="text-sm text-slate-200 mt-1 font-semibold">
-                  {selectedProject.project_metadata?.total_files || 0}
-                </div>
-              </div>
-            </div>
-
-            {/* Files List Preview */}
-            <div className="space-y-2">
-              <h3 className="text-sm font-semibold text-slate-300">Workspace Files</h3>
-              <div className="bg-slate-950 rounded border border-slate-800 max-h-60 overflow-y-auto p-2 font-mono text-xs">
-                {selectedProject.project_metadata?.files?.map((f) => (
-                  <div key={f.path} className="py-1 px-2 text-slate-400 hover:text-slate-200 flex items-center justify-between">
-                    <span>{f.path}</span>
-                    <span className="text-[11px] text-slate-600">{(f.size_bytes / 1024).toFixed(1)} KB</span>
+              <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {[
+                  { k: 'Frameworks', v: selected.project_metadata?.frameworks?.join(', ') || 'None detected' },
+                  { k: 'Entry points', v: selected.project_metadata?.entry_points?.join(', ') || 'Auto-detected', mono: true },
+                  { k: 'Files', v: String(selected.project_metadata?.total_files ?? 0) },
+                ].map((m) => (
+                  <div key={m.k} className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                    <dt className="text-xs font-medium text-slate-400">{m.k}</dt>
+                    <dd className={cn('mt-1 break-words text-sm text-slate-100', m.mono && 'font-mono text-xs')}>{m.v}</dd>
                   </div>
                 ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+              </dl>
 
-      {/* Create Project Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-lg max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-100">Create New Project</h3>
-              <button onClick={() => setShowCreateModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
-            </div>
-            <form onSubmit={handleCreateNew} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Project Name</label>
-                <input
-                  type="text"
-                  required
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  placeholder="My New App"
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200"
-                />
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-slate-200">Files</h3>
+                  <input
+                    type="search"
+                    aria-label="Filter project files"
+                    placeholder="Filter files"
+                    value={fileFilter}
+                    onChange={(e) => setFileFilter(e.target.value)}
+                    className="h-8 w-48 rounded-lg border border-slate-800 bg-slate-900 px-3 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:border-brand-500"
+                  />
+                </div>
+                <ul className="max-h-64 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-1 font-mono text-xs">
+                  {files.length === 0 ? (
+                    <li className="px-3 py-6 text-center font-sans text-sm text-slate-400">{fileFilter ? 'No files match.' : 'No files found.'}</li>
+                  ) : (
+                    files.map((f) => (
+                      <li key={f.path} className="flex items-center justify-between gap-3 rounded px-2 py-1.5 text-slate-300 hover:bg-slate-900">
+                        <span className="truncate">{f.path}</span>
+                        <span className="shrink-0 text-slate-500">{formatBytes(f.size_bytes)}</span>
+                      </li>
+                    ))
+                  )}
+                </ul>
               </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Destination Directory Path</label>
-                <input
-                  type="text"
-                  required
-                  value={projectPath}
-                  onChange={(e) => setProjectPath(e.target.value)}
-                  placeholder="C:\Projects\my-new-app"
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Description</label>
-                <textarea
-                  value={projectDesc}
-                  onChange={(e) => setProjectDesc(e.target.value)}
-                  placeholder="Project requirements and objectives..."
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 h-20 resize-none"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="px-4 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold"
-                >
-                  {loading ? 'Creating...' : 'Create Project'}
-                </button>
-              </div>
-            </form>
-          </div>
+            </Card>
+          )}
         </div>
       )}
 
-      {/* Import Project Modal */}
-      {showImportModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-lg max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-100">Import Existing Project</h3>
-              <button onClick={() => setShowImportModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
-            </div>
-            <form onSubmit={handleImportExisting} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Project Name</label>
-                <input
-                  type="text"
-                  required
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  placeholder="Existing Repository"
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Existing Folder Path</label>
-                <input
-                  type="text"
-                  required
-                  value={projectPath}
-                  onChange={(e) => setProjectPath(e.target.value)}
-                  placeholder="C:\ExistingProjects\my-codebase"
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Description</label>
-                <textarea
-                  value={projectDesc}
-                  onChange={(e) => setProjectDesc(e.target.value)}
-                  placeholder="Optional notes or description..."
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 h-20 resize-none"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowImportModal(false)}
-                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="px-4 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold"
-                >
-                  {loading ? 'Importing...' : 'Import Project'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Create / import project */}
+      <Dialog
+        open={!!projectMode}
+        onClose={() => setProjectMode(null)}
+        locked={submitting}
+        title={isCreate ? 'New project' : 'Import existing project'}
+        description={isCreate ? 'ForgeAgent creates the folder for you.' : 'Point ForgeAgent at a folder that already has your code.'}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setProjectMode(null)} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button variant="primary" type="submit" form="project-form" loading={submitting}>
+              {isCreate ? 'Create project' : 'Import project'}
+            </Button>
+          </>
+        }
+      >
+        <form id="project-form" onSubmit={submitProject} className="space-y-4">
+          <Field label="Project name" htmlFor="p-name">
+            <Input id="p-name" required value={name} onChange={(e) => setName(e.target.value)} placeholder={isCreate ? 'My new app' : 'Existing repository'} />
+          </Field>
+          <Field
+            label={isCreate ? 'Where should the folder go?' : 'Folder path'}
+            htmlFor="p-path"
+            hint={isCreate ? 'A full path, for example C:\\Projects\\my-new-app' : 'A full path, for example C:\\Projects\\my-codebase'}
+          >
+            <Input id="p-path" required value={path} onChange={(e) => setPath(e.target.value)} placeholder="C:\Projects\my-app" className="font-mono text-[13px]" />
+          </Field>
+          <Field label="Description (optional)" htmlFor="p-desc">
+            <Textarea id="p-desc" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What is this project for?" rows={3} />
+          </Field>
+          {formError && (
+            <p role="alert" className="rounded-lg border border-rose-500/40 bg-rose-950/30 px-3 py-2 text-sm text-rose-200">
+              {formError}
+            </p>
+          )}
+        </form>
+      </Dialog>
 
-      {/* Start Task Modal */}
-      {showTaskModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-lg max-w-lg w-full p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-100">Submit Coding Task</h3>
-              <button onClick={() => setShowTaskModal(false)}><X className="w-5 h-5 text-slate-400" /></button>
-            </div>
-            <form onSubmit={handleCreateTask} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Task Title</label>
-                <input
-                  type="text"
-                  required
-                  value={taskTitle}
-                  onChange={(e) => setTaskTitle(e.target.value)}
-                  placeholder="e.g. Add math calculator module and unit tests"
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-400">Task Description / Requirements</label>
-                <textarea
-                  required
-                  value={taskDesc}
-                  onChange={(e) => setTaskDesc(e.target.value)}
-                  placeholder="Describe exactly what code changes, features, or fixes the AI should propose and implement..."
-                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 h-28 resize-none font-mono text-xs"
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowTaskModal(false)}
-                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="px-4 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold"
-                >
-                  {loading ? 'Submitting...' : 'Launch Agent Task'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
+      {/* Start task */}
+      <Dialog
+        open={taskOpen}
+        onClose={() => setTaskOpen(false)}
+        locked={submitting}
+        size="lg"
+        title="Start a task"
+        description={selected ? `The agent will plan and make changes inside “${selected.name}”. You approve anything risky.` : undefined}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setTaskOpen(false)} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button variant="primary" type="submit" form="task-form" loading={submitting}>
+              Launch task
+            </Button>
+          </>
+        }
+      >
+        <form id="task-form" onSubmit={submitTask} className="space-y-4">
+          <Field label="Task title" htmlFor="t-title">
+            <Input id="t-title" required value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="Add a calculator module with tests" />
+          </Field>
+          <Field label="What should it do?" htmlFor="t-desc" hint="Be specific about the files, behaviour and checks you expect.">
+            <Textarea
+              id="t-desc"
+              required
+              value={taskDesc}
+              onChange={(e) => setTaskDesc(e.target.value)}
+              placeholder="Describe the change you want, and how to know it works."
+              rows={5}
+            />
+          </Field>
+          {taskError && (
+            <p role="alert" className="rounded-lg border border-rose-500/40 bg-rose-950/30 px-3 py-2 text-sm text-rose-200">
+              {taskError}
+            </p>
+          )}
+        </form>
+      </Dialog>
+    </Page>
   );
 };
-

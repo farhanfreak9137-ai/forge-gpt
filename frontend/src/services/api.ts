@@ -1,4 +1,4 @@
-import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval, StudioMessage, StudioWorkspaceManifest, StudioChatSession } from '../types';
+import { Project, Task, TaskDetail, ActivityEvent, ConnectorInfo, AppSettings, Approval, StudioMessage, StudioWorkspaceManifest, StudioChatSession, StudioPendingAction } from '../types';
 
 const BASE_URL = '/api/v1';
 
@@ -38,6 +38,9 @@ export const api = {
   pauseTask: (id: string) => request<{ status: string }>(`/tasks/${id}/pause`, { method: 'POST' }),
   resumeTask: (id: string) => request<{ status: string }>(`/tasks/${id}/resume`, { method: 'POST' }),
   cancelTask: (id: string) => request<{ status: string }>(`/tasks/${id}/cancel`, { method: 'POST' }),
+  deleteTask: (id: string) => request<{ status: string }>(`/tasks/${id}`, { method: 'DELETE' }),
+  cleanupTasks: (data: { older_than_hours?: number; project_id?: string; delete_finished?: boolean } = {}) =>
+    request<{ cancelled: number; deleted: number }>('/tasks/cleanup', { method: 'POST', body: JSON.stringify(data) }),
   rollbackTask: (taskId: string, checkpointRef: string) =>
     request<{ status: string }>(`/tasks/${taskId}/rollback`, {
       method: 'POST',
@@ -99,6 +102,15 @@ export const api = {
     request<{ status: string; session_id: string }>(`/studio/sessions/${sessionId}`, { method: 'DELETE' }),
   sendStudioChat: (data: { message: string; workspace_path?: string; auto_pilot?: boolean; connector_name?: string }) =>
     request<StudioMessage>('/studio/chat', { method: 'POST', body: JSON.stringify(data) }),
+  approveStudioAction: (messageId: string, actionId: string) =>
+    request<StudioPendingAction>(`/studio/messages/${messageId}/actions/${actionId}/approve`, { method: 'POST' }),
+  rejectStudioAction: (messageId: string, actionId: string) =>
+    request<StudioPendingAction>(`/studio/messages/${messageId}/actions/${actionId}/reject`, { method: 'POST' }),
+  pruneStudioSessions: (keepLatest = 10) =>
+    request<{ removed: number; remaining: number }>('/studio/sessions/prune', {
+      method: 'POST',
+      body: JSON.stringify({ keep_latest: keepLatest, remove_empty: true }),
+    }),
   getStudioHistory: () => request<StudioMessage[]>('/studio/history'),
   clearStudioHistory: () => request<{ status: string }>('/studio/history', { method: 'DELETE' }),
   getStudioFiles: (workspacePath?: string) =>

@@ -1,8 +1,8 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Navbar } from './components/layout/Navbar';
-import { Sidebar } from './components/layout/Sidebar';
+import { AppShell } from './components/layout/AppShell';
+import { ConfirmProvider, ToastProvider } from './components/ui';
 import { StudioPage } from './features/studio/StudioPage';
 import { OverviewPage } from './features/dashboard/OverviewPage';
 import { ProjectsPage } from './features/projects/ProjectsPage';
@@ -15,12 +15,10 @@ const queryClient = new QueryClient();
 export const App: React.FC = () => {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
-          <Navbar />
-          <div className="flex flex-1 overflow-hidden">
-            <Sidebar />
-            <main className="flex-1 overflow-y-auto">
+      <ToastProvider>
+        <BrowserRouter>
+          <ConfirmProvider>
+            <AppShell>
               <Routes>
                 <Route path="/" element={<StudioPage />} />
                 <Route path="/studio" element={<StudioPage />} />
@@ -29,14 +27,14 @@ export const App: React.FC = () => {
                 <Route path="/workspace" element={<TaskWorkspacePage />} />
                 <Route path="/activity" element={<ActivityPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
-            </main>
-          </div>
-        </div>
-      </BrowserRouter>
+            </AppShell>
+          </ConfirmProvider>
+        </BrowserRouter>
+      </ToastProvider>
     </QueryClientProvider>
   );
 };
 
 export default App;
-

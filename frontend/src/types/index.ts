@@ -169,6 +169,18 @@ export interface StudioCommandAction {
   stderr?: string;
   duration_ms?: number;
   passed?: boolean;
+  status?: 'EXECUTED' | 'BLOCKED' | string;
+}
+
+export interface StudioPendingAction {
+  id: string;
+  kind: 'command' | 'file';
+  status: 'PENDING_APPROVAL' | 'EXECUTED' | 'APPLIED' | 'REJECTED' | 'FAILED' | string;
+  reason: string;
+  command?: string;
+  file_path?: string;
+  workspace_path?: string;
+  result?: StudioCommandAction | { error: string };
 }
 
 export interface StudioMessage {
@@ -179,6 +191,8 @@ export interface StudioMessage {
   file_actions?: StudioFileAction[];
   executed_file_changes?: Array<{ path: string; lines: number; status: string }>;
   executed_commands?: StudioCommandAction[];
+  pending_actions?: StudioPendingAction[];
+  action_errors?: string[];
   repair_iterations?: number;
   timestamp: string;
 }
