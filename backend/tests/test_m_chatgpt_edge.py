@@ -1,6 +1,17 @@
+import os
+
 import pytest
 from app.ai.adapters.chatgpt_edge_adapter import ChatGPTEdgeAdapter
 from app.browser.manager.browser_manager import browser_manager
+
+# Needs a visible Microsoft Edge that is already logged in to chatgpt.com, so it never runs by default.
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.environ.get("FORGEAGENT_LIVE_TESTS") != "1",
+        reason="live ChatGPT/Edge test; set FORGEAGENT_LIVE_TESTS=1 to run it",
+    ),
+]
 
 
 @pytest.mark.asyncio

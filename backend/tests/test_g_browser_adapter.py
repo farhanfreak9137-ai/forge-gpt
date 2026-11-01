@@ -3,11 +3,11 @@ import tempfile
 from pathlib import Path
 from app.browser.mock_chatbot.html_template import MOCK_CHATBOT_HTML
 from app.ai.adapters.browser_automation_adapter import BrowserAutomationAdapter
-from app.browser.manager.browser_manager import browser_manager
+from app.browser.manager.browser_manager import BrowserManager
 
 
 @pytest.mark.asyncio
-async def test_g_browser_adapter_with_mock_site():
+async def test_g_browser_adapter_with_mock_site(tmp_path):
     """
     Test G: Browser Adapter
     Uses the local mock chatbot site.
@@ -22,11 +22,13 @@ async def test_g_browser_adapter_with_mock_site():
         f.write(MOCK_CHATBOT_HTML)
         mock_file_path = Path(f.name).as_uri()
 
+    # Isolated headless Chromium with a throwaway profile: no Edge, no CDP port, no real logins.
+    isolated = BrowserManager(profile_dir=tmp_path / "profile", headless=True, use_cdp=False)
     adapter = BrowserAutomationAdapter("browser_automation", {
         "target_url": mock_file_path,
         "timeout_ms": 15000,
         "is_permitted": True,
-    })
+    }, manager=isolated)
 
     try:
         # 1. Successful submission and completion detection
@@ -49,7 +51,7 @@ async def test_g_browser_adapter_with_mock_site():
         assert "Chatbot indicated error state" in str(exc_info.value)
 
     finally:
-        await browser_manager.close()
+        await isolated.close()
         try:
             Path(mock_file_path).unlink(missing_ok=True)
         except Exception:

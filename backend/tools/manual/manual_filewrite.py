@@ -1,8 +1,7 @@
 import urllib.request, json, sys
 
 payload = json.dumps({
-    "message": "Create a file called hello.txt with the content: Hello from ForgeAgent! This works perfectly.",
-    "workspace_path": "C:/Personal Workspace/Autonomous Agent"
+    "message": "Create a file called hello.txt with the content: Hello from ForgeAgent! This works perfectly."
 }).encode()
 
 req = urllib.request.Request(
