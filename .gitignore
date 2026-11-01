@@ -33,6 +33,7 @@ yarn-error.log*
 frontend/dist/
 
 # ForgeAgent Local Data
+workspace/
 data/
 *.db
 *.sqlite

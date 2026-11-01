@@ -1,5 +1,11 @@
 # ForgeAgent V1 Acceptance Test Verification Report
 
+> **Latest verification (2026-11-01, Windows 11, Python 3.12.10):** `pytest tests` -> **125 passed, 1 skipped**.
+> The skipped test is Test M, which needs a logged-in Edge session and the real chatgpt.com, so it only runs
+> with `FORGEAGENT_LIVE_TESTS=1`. The suite now also covers the command allowlist (O), the Studio approval flow (P)
+> and orchestrator resilience (Q). Test G runs against an isolated headless Chromium instead of the user's Edge.
+> The evidence below is the original October run on the author's machine and has not been regenerated.
+
 **Environment**: Windows 11 x64, Python 3.12.16 (via uv), Node.js v22.23.3, Playwright Chromium & Microsoft Edge (msedge).
 **Date**: October 30, 2026
 **Test Runner**: Pytest 9.2.0 with Pytest-Asyncio 1.4.1

@@ -74,9 +74,9 @@ flowchart TD
 | `CREATED` | `SCANNING`, `PAUSED`, `CANCELLED` | Task created in database |
 | `SCANNING` | `PLANNING`, `FAILED`, `CANCELLED` | Scanning workspace structure & manifest |
 | `PLANNING` | `WAITING_FOR_AI`, `FAILED`, `CANCELLED` | Requesting step plan from AI |
-| `WAITING_FOR_AI` | `PARSING`, `VALIDATING`, `APPLYING`, `FAILED`, `PAUSED`, `CANCELLED` | Waiting for AI provider response |
+| `WAITING_FOR_AI` | `PARSING`, `VALIDATING`, `APPLYING`, `TESTING`, `FAILED`, `PAUSED`, `CANCELLED` | Waiting for AI provider response |
 | `PARSING` | `VALIDATING`, `WAITING_FOR_AI`, `FAILED`, `CANCELLED` | Validating JSON envelope against `forgeagent.v1` |
-| `VALIDATING` | `APPLYING`, `WAITING_FOR_APPROVAL`, `WAITING_FOR_AI`, `FAILED`, `CANCELLED` | Pre-flight validation, hash check, permission audit |
+| `VALIDATING` | `APPLYING`, `WAITING_FOR_APPROVAL`, `WAITING_FOR_AI`, `VERIFYING`, `FAILED`, `CANCELLED` | Pre-flight validation, hash check, permission audit |
 | `WAITING_FOR_APPROVAL` | `APPLYING`, `PLANNING`, `PAUSED`, `FAILED`, `CANCELLED` | Paused awaiting explicit user approval |
 | `APPLYING` | `TESTING`, `VERIFYING`, `FAILED`, `CANCELLED` | Applying patches & writing files atomically |
 | `TESTING` | `VERIFYING`, `REPAIRING`, `COMPLETED`, `FAILED`, `CANCELLED` | Executing automated test suite |
@@ -84,7 +84,7 @@ flowchart TD
 | `VERIFYING` | `COMPLETED`, `REPAIRING`, `FAILED`, `CANCELLED` | Finalizing git checkpoints and task summary |
 | `COMPLETED` | _Terminal_ | Verification successful |
 | `PAUSED` | `SCANNING`, `PLANNING`, `WAITING_FOR_AI`, `APPLYING`, `TESTING`, `CANCELLED` | Paused by user or recovery scan |
-| `FAILED` | `RECOVERY_REQUIRED`, `PLANNING` | Execution halted on unrecoverable failure |
+| `FAILED` | `RECOVERY_REQUIRED`, `PLANNING`, `CANCELLED` | Execution halted on unrecoverable failure |
 | `CANCELLED` | _Terminal_ | Cancelled by user |
-| `RECOVERY_REQUIRED` | `CREATED`, `SCANNING`, `PAUSED`, `FAILED` | Ambiguous state requiring user review |
+| `RECOVERY_REQUIRED` | `CREATED`, `SCANNING`, `PAUSED`, `FAILED`, `CANCELLED` | Ambiguous state requiring user review |
 

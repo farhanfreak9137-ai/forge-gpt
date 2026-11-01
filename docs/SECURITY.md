@@ -32,7 +32,9 @@ ForgeAgent divides all system actions into three strict permission tiers:
 - Deleting files (`ChangeOperation.DELETE`).
 - Modifying sensitive configuration files (`.env`, `docker-compose.yml`, `Dockerfile`).
 - Installing or updating packages (`npm install`, `pip install`, `yarn add`).
-- Executing unapproved commands outside the allowlist.
+- Any command the AI proposes in Studio unless Auto-Pilot is on and the policy treats it as safe (Auto-Pilot is off by default).
+- Writing sensitive files (`.env*`, `Dockerfile`, `docker-compose.*`, `.github/`) from Studio.
+- Commands outside the allowlist are never runnable at all, with or without approval.
 - Remote Git operations (`git push`, destructive hard resets).
 - Switching AI reasoning providers.
 
@@ -52,10 +54,25 @@ The `SafeFileManager` enforces the following checks on every file operation:
 ## 4. Execution Sandbox
 
 ### Windows Native Mode
-- Strict command allowlist: `git`, `python`, `py`, `pytest`, `node`, `npm`, `npx`, `pip`, `uv`, `cargo`, `dotnet`, `go`, `cmd`, `powershell`.
-- Rejects shell operator chaining (`&&`, `||`, `;`, `|`, `` ` ``, `$()`).
-- Bounded process execution timeouts (default 60 seconds).
-- Explicit working directory confinement to the workspace root.
+- Strict command allowlist: `git`, `python`, `py`, `pytest`, `node`, `npm`, `pip`, `uv`, `cargo`, `dotnet`, `go`. Shells (`cmd`, `powershell`) and package runners (`npx`) are not on it.
+- Arguments are validated per tool, not just the executable name:
+  - no inline code or stdin scripts (`python -c`, `python -`, `node -e`, `--require`), and only `.py` / `.js` scripts or a short list of Python modules (`pytest`, `unittest`, `compileall`, `py_compile`, `pip`);
+  - no package execution (`npm exec`, `uv run`, `uv tool`) and no custom package indexes, VCS or URL package sources, or global installs;
+  - no global git options (`-c`, `--exec-path`), no `git config`, `clone`, `fetch`, or `pull`;
+  - every path-like argument must resolve inside the workspace; URLs and `@response-files` are rejected.
+- The executable must be a bare tool name. A path or a `.bat`/`.cmd` name is refused, so a file written into the workspace cannot pose as `python`, and tools are resolved from `PATH` entries outside the workspace.
+- Shell operators (`&&`, `||`, `;`, `|`, `` ` ``, `$()`), metacharacters (`& < > ^ % !`) and multi-line commands are rejected.
+- Commands run without a shell, with stdin closed and credentials (`FORGEAGENT_*`, `OPENAI_*`, `*_TOKEN`, `*_API_KEY`, `*_SECRET`, `*_PASSWORD`, ...) removed from the environment.
+- Bounded timeouts (default 60 seconds); on timeout the whole process tree is killed.
+- Working directory confinement to the workspace root. `.git` internals (hooks, config) can never be written through the file manager, because a hook would run on the next checkpoint commit.
+
+**Limits.** The allowlist stops the agent from running arbitrary code *it was not asked to run*; it cannot make project code harmless. A `pytest` or `python script.py` run executes whatever the agent wrote into the workspace, so treat approvals as the real control and use Docker mode for untrusted work. The Studio chat workspace defaults to `workspace/` (outside the application source) for the same reason.
+
+### Studio Chat Approval Flow
+- File writes inside the workspace are applied immediately, except sensitive paths, which wait for approval.
+- Commands from the AI are queued as `pending_actions` unless **Auto-Pilot** is on *and* the permission policy classifies the command as safe. Installs, `git push`, `git reset --hard`, `git clean` and similar always queue.
+- A queued command is run via `POST /api/v1/studio/messages/{message_id}/actions/{action_id}/approve` and goes through the allowlist again; nothing outside it can be approved into running.
+- The emergency stop makes every command and file write queue, and blocks approvals until it is reset.
 
 ### Docker Mode
 - Containerized execution providing isolated namespaces for processes, network, and filesystem.

@@ -44,7 +44,8 @@ forgeagent/
 │   │   ├── execution/                 # Safe command runner, test runner, diagnostics
 │   │   ├── memory/                    # SQLAlchemy models, async SQLite DB engine
 │   │   └── events/                    # EventBus with SQLite persistence & broadcast
-│   ├── tests/                         # Mandatory Acceptance Tests A - L
+│   ├── tests/                         # Acceptance Tests A - N, security (O, P) and resilience (Q) tests
+│   ├── tools/manual/                  # Manual smoke scripts for a running backend (not collected by pytest)
 │   ├── pyproject.toml
 │   └── requirements.txt
 ├── frontend/
@@ -59,6 +60,7 @@ forgeagent/
 │   ├── package.json
 │   └── vite.config.ts
 ├── docs/                              # Architecture, Connectors, Security, Acceptance Report
+├── workspace/                         # Default Studio sandbox (git-ignored; agent output lands here)
 ├── scripts/
 │   ├── setup.ps1                      # Windows environment setup script
 │   ├── start.ps1                      # Local startup launcher
@@ -101,7 +103,7 @@ This script will:
 
 ## Running the Acceptance Test Suite (Tests A - L)
 
-To execute all 14 end-to-end acceptance tests:
+To execute the full automated suite:
 ```powershell
 .\scripts\test.ps1
 ```
@@ -111,7 +113,9 @@ cd backend
 .\.venv\Scripts\python -m pytest tests -v
 ```
 
-All 14 tests run in ~22 seconds with **100% pass rate**:
+The suite (acceptance tests A - N plus the command-policy, Studio-approval and orchestrator-resilience tests) is isolated from your real data: it uses a throwaway database, chat-session file and browser profile. The one live test, **Test M** (real chatgpt.com in a logged-in Edge), is skipped unless you set `FORGEAGENT_LIVE_TESTS=1`.
+
+The acceptance tests are:
 - **Test A**: New Project Creation & Scaffolding
 - **Test B**: Existing Project Modification & Preservation
 - **Test C**: Automatic Debugging & Repair Loop
@@ -124,6 +128,10 @@ All 14 tests run in ~22 seconds with **100% pass rate**:
 - **Test J**: OpenAI-Compatible HTTP Connector
 - **Test K**: Workspace Isolation (Path Traversal & Shell Chaining, 2 tests)
 - **Test L**: Continuing Multi-Task Development Session
+- **Test M**: Live ChatGPT in Microsoft Edge (opt-in: `FORGEAGENT_LIVE_TESTS=1`)
+- **Test N**: Studio Chat, Action Parser and File Retry
+
+Additional suites cover the command allowlist and permission policy (**O**), the Studio approval flow (**P**), and orchestrator resilience: AI-response retry, approval resume, pause, and stale-task cleanup (**Q**).
 
 ---
 
