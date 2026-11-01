@@ -1,964 +1,898 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
-  Send,
-  Terminal,
-  FileCode,
-  CheckCircle2,
-  XCircle,
-  RotateCcw,
-  Save,
-  FolderOpen,
-  RefreshCw,
-  Eye,
-  Zap,
-  ChevronDown,
-  ChevronRight,
   Code2,
-  Sparkles,
   ExternalLink,
-  Copy,
-  Check,
-  MessageSquare,
-  Plus,
-  Trash2,
+  FileCode,
+  FolderOpen,
   PanelLeftClose,
   PanelLeftOpen,
-  Search,
+  PanelRightClose,
+  PanelRightOpen,
+  Plus,
+  RefreshCw,
+  Save,
+  Send,
+  ShieldAlert,
+  Sparkles,
+  Terminal,
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
-import { StudioMessage, StudioWorkspaceManifest, StudioChatSession } from '../../types';
+import { cn } from '../../lib/cn';
+import { CONNECTORS, connectorMeta } from '../../lib/connectors';
+import { detectLanguage, formatBytes, splitPath } from '../../lib/format';
+import { useDocumentTitle, useMediaQuery } from '../../lib/hooks';
+import { useAppStore } from '../../stores/useAppStore';
+import { StudioChatSession, StudioCommandAction, StudioMessage, StudioWorkspaceManifest } from '../../types';
 import { MonacoEditorView } from '../../components/editor/MonacoEditorView';
+import { Badge, Button, ErrorState, IconButton, Mascot, Segmented, Select, Spinner, Switch, useConfirm, useToast } from '../../components/ui';
+import { MessageView } from './MessageView';
+import { SessionList } from './SessionList';
+
+const PANEL_KEY = 'forgeagent.studio.panelWidth';
+const PANEL_MIN = 340;
+const CHAT_MIN = 380;
+const HISTORY_W = 256;
+
+const QUICK_PROMPTS = [
+  { emoji: '\u{1F44B}', title: 'Say hi', text: 'How are you? What can you do?' },
+  { emoji: '\u{1F4DC}', title: 'Write a script', text: 'Write a python script to check system memory and CPU usage' },
+  { emoji: '\u{1F9E9}', title: 'Build a component', text: 'Create a simple React counter component with increment and reset' },
+  { emoji: '\u{1FA7A}', title: 'Check project health', text: 'Run tests with pytest to check current workspace health' },
+];
+
+const WORKING_PHRASES = [
+  'Reading your request',
+  'Thinking it through',
+  'Working out a plan',
+  'Writing some code',
+  'Double-checking the details',
+];
+
+function readPanelWidth(): number {
+  try {
+    const v = Number(localStorage.getItem(PANEL_KEY));
+    return Number.isFinite(v) && v >= PANEL_MIN ? v : 480;
+  } catch {
+    return 480;
+  }
+}
 
 export const StudioPage: React.FC = () => {
-  // State
+  const toast = useToast();
+  const confirm = useConfirm();
+  const { settings, setSettings, setStudioPendingCount, isEmergencyStopActive } = useAppStore();
+  const connectorName = settings?.default_ai_connector ?? 'chatgpt_edge';
+  const meta = connectorMeta(connectorName);
+
+  // Responsive layout
+  const isSplit = useMediaQuery('(min-width: 1280px)'); // chat + workspace side by side
+  const historyInline = useMediaQuery('(min-width: 1650px)'); // chat list docked instead of a drawer
+  const [mobileView, setMobileView] = useState<'chat' | 'workspace'>('chat');
+  const [historyChoice, setHistoryChoice] = useState<boolean | null>(null);
+  const historyOpen = historyChoice ?? historyInline;
+  const [panelWidth, setPanelWidth] = useState(readPanelWidth);
+  const [panelOpen, setPanelOpen] = useState(false); // the workspace stays out of the way until you need it
+  const [containerWidth, setContainerWidth] = useState(1400);
+  const [dragging, setDragging] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Conversation
   const [messages, setMessages] = useState<StudioMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [autoPilot, setAutoPilot] = useState(true);
-  const [connectorName, setConnectorName] = useState('chatgpt_edge');
-  const [activeTab, setActiveTab] = useState<'editor' | 'files' | 'terminal'>('editor');
-  
-  // Session / Chat History State
+  const [elapsed, setElapsed] = useState(0);
+  const [autoPilot, setAutoPilot] = useState(false); // AI-suggested commands need approval unless the user opts in
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+
+  // Sessions
   const [sessions, setSessions] = useState<StudioChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [sessionSearch, setSessionSearch] = useState('');
   const [isSyncingSessions, setIsSyncingSessions] = useState(false);
 
-  // Workspace & Editor state
+  // Workspace panel
+  const [activeTab, setActiveTab] = useState<'editor' | 'files' | 'terminal'>('editor');
   const [manifest, setManifest] = useState<StudioWorkspaceManifest | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<string>('');
+  const [fileContent, setFileContent] = useState('');
+  const [savedContent, setSavedContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [fileFilter, setFileFilter] = useState('');
-  const [expandedCommands, setExpandedCommands] = useState<Record<string, boolean>>({});
-  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dirty = !!selectedFile && fileContent !== savedContent;
 
-  const handleCopyText = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
+  const pendingCount = useMemo(
+    () => messages.reduce((n, m) => n + (m.pending_actions ?? []).filter((a) => a.status === 'PENDING_APPROVAL').length, 0),
+    [messages],
+  );
+  useEffect(() => setStudioPendingCount(pendingCount), [pendingCount, setStudioPendingCount]);
+  useDocumentTitle(pendingCount > 0 ? `(${pendingCount}) Approval needed` : 'Agent Studio');
 
-  const loadSessions = async (sync = true) => {
-    setIsSyncingSessions(true);
+  /* ---------------- loading ---------------- */
+
+  const loadSessions = useCallback(async (sync = false) => {
+    setIsSyncingSessions(sync);
     try {
       const data = await api.getStudioSessions(sync);
       setSessions(data);
       const active = data.find((s) => s.is_active);
-      if (active) {
-        setActiveSessionId(active.id);
-      } else if (data.length > 0 && !activeSessionId) {
-        setActiveSessionId(data[0].id);
-      }
+      setActiveSessionId((cur) => active?.id ?? cur ?? data[0]?.id ?? null);
+      return true;
     } catch (e) {
       console.error('Failed to load sessions', e);
+      return false;
     } finally {
       setIsSyncingSessions(false);
     }
+  }, []);
+
+  const loadWorkspaceFiles = useCallback(async () => {
+    try {
+      setManifest(await api.getStudioFiles());
+    } catch (e) {
+      console.error('Failed to load workspace files', e);
+    }
+  }, []);
+
+  const loadAll = useCallback(async () => {
+    setInitialLoading(true);
+    setLoadError(null);
+    // Not syncing with ChatGPT here: that would drive your Edge browser just for opening the page.
+    const results = await Promise.allSettled([
+      loadSessions(false),
+      api.getStudioHistory().then(setMessages),
+      loadWorkspaceFiles(),
+    ]);
+    const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed || results[0].status === 'fulfilled' && results[0].value === false) {
+      setLoadError((failed?.reason as Error)?.message || 'The backend did not respond.');
+    }
+    setInitialLoading(false);
+  }, [loadSessions, loadWorkspaceFiles]);
+
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
+
+  // Keep the newest message in view
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, isLoading]);
+
+  // "Working…" timer
+  useEffect(() => {
+    if (!isLoading) return;
+    setElapsed(0);
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [isLoading]);
+
+  // Track the width available to the split layout
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setContainerWidth(el.clientWidth));
+    ro.observe(el);
+    setContainerWidth(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+
+  const effectivePanel = Math.min(
+    Math.max(panelWidth, PANEL_MIN),
+    Math.max(PANEL_MIN, containerWidth - (historyOpen && historyInline ? HISTORY_W : 0) - CHAT_MIN),
+  );
+
+  /* ---------------- panel resize ---------------- */
+
+  const persistPanel = (w: number) => {
+    try {
+      localStorage.setItem(PANEL_KEY, String(Math.round(w)));
+    } catch {
+      /* ignore */
+    }
   };
+
+  const onDividerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    setDragging(true);
+    const move = (ev: PointerEvent) => {
+      const right = containerRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+      setPanelWidth(Math.round(right - ev.clientX));
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      setDragging(false);
+      const right = containerRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+      persistPanel(right - ev.clientX);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const onDividerKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const next = effectivePanel + (e.key === 'ArrowLeft' ? 32 : -32);
+    setPanelWidth(next);
+    persistPanel(next);
+  };
+
+  /* ---------------- sessions ---------------- */
 
   const handleSelectSession = async (sessionId: string) => {
     try {
       setActiveSessionId(sessionId);
       const session = await api.selectStudioSession(sessionId);
       setMessages(session.messages || []);
-      setSessions((prev) =>
-        prev.map((s) => ({ ...s, is_active: s.id === sessionId }))
-      );
-    } catch (e) {
-      console.error('Failed to select session', e);
+      setSessions((prev) => prev.map((s) => ({ ...s, is_active: s.id === sessionId })));
+      if (!historyInline) setHistoryChoice(false);
+      setMobileView('chat');
+    } catch (e: any) {
+      toast.error(`Could not open that chat: ${e.message}`);
     }
   };
 
-  const handleCreateNewSession = async () => {
+  const handleNewChat = async () => {
     try {
-      const newSession = await api.createStudioSession('New Chat');
+      const created = await api.createStudioSession('New Chat');
       setMessages([]);
-      setActiveSessionId(newSession.id);
+      setActiveSessionId(created.id);
       await loadSessions(false);
-    } catch (e) {
-      console.error('Failed to create new session', e);
+      if (!historyInline) setHistoryChoice(false);
+      setMobileView('chat');
+      textareaRef.current?.focus();
+    } catch (e: any) {
+      toast.error(`Could not start a new chat: ${e.message}`);
     }
   };
 
-  const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
-    e.stopPropagation();
+  const handleDeleteSession = async (sessionId: string, title: string) => {
+    const ok = await confirm({
+      title: 'Delete this chat?',
+      message: (
+        <>
+          “{title}” and its messages will be permanently removed. This can't be undone.
+        </>
+      ),
+      confirmLabel: 'Delete chat',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.deleteStudioSession(sessionId);
       if (sessionId === activeSessionId) {
         const remaining = sessions.filter((s) => s.id !== sessionId);
-        if (remaining.length > 0) {
-          await handleSelectSession(remaining[0].id);
-        } else {
-          await handleCreateNewSession();
-        }
+        if (remaining.length > 0) await handleSelectSession(remaining[0].id);
+        else await handleNewChat();
       }
       await loadSessions(false);
-    } catch (e) {
-      console.error('Failed to delete session', e);
+      toast.success('Chat deleted.');
+    } catch (e: any) {
+      toast.error(`Could not delete the chat: ${e.message}`);
     }
   };
 
-  const renderMessageContent = (content: string) => {
-    if (!content) return null;
-
-    // Split markdown code blocks: ```lang ... ```
-    const parts = content.split(/(```[\s\S]*?```)/g);
-
-    return parts.map((part, pIdx) => {
-      if (part.startsWith('```') && part.endsWith('```')) {
-        const firstLineEnd = part.indexOf('\n');
-        const lang = firstLineEnd !== -1 ? part.slice(3, firstLineEnd).trim() : '';
-        const code = firstLineEnd !== -1 ? part.slice(firstLineEnd + 1, -3).trim() : part.slice(3, -3).trim();
-
-        return (
-          <div key={pIdx} className="my-2.5 rounded-lg border border-slate-800 bg-slate-950 overflow-hidden text-xs">
-            <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800/80 text-[11px] text-slate-400">
-              <span className="font-mono text-emerald-400 font-semibold">{lang || 'code'}</span>
-              <button
-                onClick={() => handleCopyText(`code-${pIdx}`, code)}
-                className="flex items-center gap-1 hover:text-white transition text-slate-400"
-                title="Copy code"
-              >
-                {copiedId === `code-${pIdx}` ? (
-                  <>
-                    <Check className="w-3 h-3 text-emerald-400" />
-                    <span className="text-emerald-400">Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3 h-3" />
-                    <span>Copy</span>
-                  </>
-                )}
-              </button>
-            </div>
-            <pre className="p-3 overflow-x-auto font-mono text-slate-200 text-xs leading-relaxed selection:bg-emerald-500/30">
-              <code>{code}</code>
-            </pre>
-          </div>
-        );
-      }
-
-      return (
-        <div key={pIdx} className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed my-1">
-          {part}
-        </div>
-      );
+  const handlePrune = async () => {
+    const ok = await confirm({
+      title: 'Clean up old chats?',
+      message: 'This deletes empty chats and everything except your 10 most recent chats. It can\'t be undone.',
+      confirmLabel: 'Delete old chats',
+      tone: 'danger',
     });
-  };
-
-  // Load chat history, sessions & workspace files on mount
-  useEffect(() => {
-    loadSessions(true);
-    loadChatHistory();
-    loadWorkspaceFiles();
-  }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
-
-  const loadChatHistory = async () => {
+    if (!ok) return;
     try {
-      const history = await api.getStudioHistory();
-      setMessages(history);
-    } catch (e) {
-      console.error('Failed to load studio chat history', e);
+      const res = await api.pruneStudioSessions(10);
+      await loadSessions(false);
+      toast.success(`Removed ${res.removed} chat${res.removed === 1 ? '' : 's'}.`);
+    } catch (e: any) {
+      toast.error(`Clean-up failed: ${e.message}`);
     }
   };
 
-  const loadWorkspaceFiles = async () => {
-    try {
-      const data = await api.getStudioFiles();
-      setManifest(data);
-    } catch (e) {
-      console.error('Failed to load workspace files', e);
-    }
+  const handleSync = async () => {
+    const ok = await loadSessions(true);
+    if (ok) toast.success('Chats synced with ChatGPT.');
+    else toast.error('Could not sync. Is Edge open and logged in to ChatGPT?');
   };
 
-  const handleClearHistory = async () => {
-    await handleCreateNewSession();
+  // "New chat" from the command palette arrives as /?new=1
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    // Wait for the first load so its (older) history can't overwrite the fresh chat
+    if (!initialLoading && searchParams.get('new')) {
+      setSearchParams({}, { replace: true });
+      handleNewChat();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialLoading, searchParams]);
+
+  /* ---------------- connector / edge ---------------- */
+
+  const handleConnectorChange = async (value: string) => {
+    const previous = settings;
+    if (settings) setSettings({ ...settings, default_ai_connector: value });
+    try {
+      await api.updateSettings({ default_ai_connector: value });
+    } catch (e: any) {
+      if (previous) setSettings(previous);
+      toast.error(`Could not switch the AI engine: ${e.message}`);
+    }
   };
 
   const handleOpenEdge = async () => {
     try {
       await api.openStudioBrowser();
+      toast.info('Edge is opening. Log in to ChatGPT there, then come back.');
     } catch (e: any) {
-      alert(`Could not launch Edge automatically: ${e.message}. You can double-click OPEN_EDGE_CHATGPT.bat in your project folder.`);
+      toast.error(`Could not open Edge automatically: ${e.message}. You can also run OPEN_EDGE_CHATGPT.bat.`);
+    }
+  };
+
+  /* ---------------- messaging ---------------- */
+
+  const handleDecideAction = async (messageId: string, actionId: string, approve: boolean) => {
+    setBusyAction(actionId);
+    try {
+      const updated = approve
+        ? await api.approveStudioAction(messageId, actionId)
+        : await api.rejectStudioAction(messageId, actionId);
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const executed = [...(m.executed_commands || [])];
+          if (approve && updated.kind === 'command' && updated.result && 'command' in updated.result) {
+            executed.push(updated.result as StudioCommandAction);
+          }
+          return {
+            ...m,
+            pending_actions: (m.pending_actions || []).map((a) => (a.id === actionId ? updated : a)),
+            executed_commands: executed,
+          };
+        }),
+      );
+      if (approve && updated.kind === 'file') await loadWorkspaceFiles();
+    } catch (e: any) {
+      toast.error(`Could not ${approve ? 'approve' : 'reject'} the action: ${e.message}`);
+    } finally {
+      setBusyAction(null);
     }
   };
 
   const handleSendMessage = async (textToSend?: string) => {
-    const text = (textToSend || inputMessage).trim();
+    const text = (textToSend ?? inputMessage).trim();
     if (!text || isLoading) return;
 
     setInputMessage('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setIsLoading(true);
+    setMobileView('chat');
 
-    // Optimistically add user message
-    const tempUserMsg: StudioMessage = {
-      id: `temp-${Date.now()}`,
-      sender: 'user',
-      text,
-      timestamp: new Date().toISOString(),
-    };
+    const tempUserMsg: StudioMessage = { id: `temp-${Date.now()}`, sender: 'user', text, timestamp: new Date().toISOString() };
     setMessages((prev) => [...prev, tempUserMsg]);
 
     try {
-      const assistantReply = await api.sendStudioChat({
-        message: text,
-        auto_pilot: autoPilot,
-        connector_name: connectorName,
-      });
-
-      // Replace or append
-      setMessages((prev) => [...prev.filter((m) => m.id !== tempUserMsg.id), tempUserMsg, assistantReply]);
+      const reply = await api.sendStudioChat({ message: text, auto_pilot: autoPilot, connector_name: connectorName });
+      setMessages((prev) => [...prev.filter((m) => m.id !== tempUserMsg.id), tempUserMsg, reply]);
       await loadSessions(false);
 
-      // If files were modified, refresh file list and open the last modified file
-      if (assistantReply.executed_file_changes && assistantReply.executed_file_changes.length > 0) {
+      if (reply.executed_file_changes && reply.executed_file_changes.length > 0) {
         await loadWorkspaceFiles();
-        const lastFile = assistantReply.executed_file_changes[assistantReply.executed_file_changes.length - 1].path;
-        handleOpenFile(lastFile);
+        await handleOpenFile(reply.executed_file_changes[reply.executed_file_changes.length - 1].path, true);
       }
     } catch (err: any) {
-      const errorMsg: StudioMessage = {
-        id: `err-${Date.now()}`,
-        sender: 'assistant',
-        text: `Error: ${err.message || 'Failed to process request'}`,
-        clean_message: `An error occurred: ${err.message || 'Failed to connect to agent backend'}`,
-        timestamp: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          sender: 'assistant',
+          text: `Error: ${err.message || 'Failed to process request'}`,
+          clean_message: `**Something went wrong.** ${err.message || 'The agent backend did not respond.'}\n\nYour message was not lost. Edit it above and send it again.`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+      setInputMessage((cur) => cur || text);
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSendMessage();
     }
   };
 
-  const handleOpenFile = async (filePath: string) => {
+  const autoGrow = (el: HTMLTextAreaElement) => {
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+  };
+
+  /* ---------------- files ---------------- */
+
+  const handleOpenFile = async (filePath: string, skipGuard = false) => {
+    if (!skipGuard && dirty && filePath !== selectedFile) {
+      const ok = await confirm({
+        title: 'Discard unsaved changes?',
+        message: `You have unsaved edits in ${selectedFile}. Opening another file will lose them.`,
+        confirmLabel: 'Discard & open',
+        tone: 'danger',
+      });
+      if (!ok) return;
+    }
     setSelectedFile(filePath);
     setActiveTab('editor');
-    setSaveStatus(null);
+    setPanelOpen(true);
+    if (!isSplit) setMobileView('workspace');
     try {
       const res = await api.getStudioFileContent(filePath);
       setFileContent(res.content);
+      setSavedContent(res.content);
     } catch (e: any) {
-      console.error(`Failed to read file ${filePath}`, e);
-      setFileContent(`// Error reading file ${filePath}: ${e.message}`);
+      toast.error(`Could not read ${filePath}: ${e.message}`);
+      setFileContent('');
+      setSavedContent('');
     }
   };
 
   const handleSaveFile = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || !dirty) return;
     setIsSaving(true);
-    setSaveStatus(null);
     try {
-      await api.saveStudioFile({
-        file_path: selectedFile,
-        content: fileContent,
-      });
-      setSaveStatus('Saved!');
-      setTimeout(() => setSaveStatus(null), 2500);
+      await api.saveStudioFile({ file_path: selectedFile, content: fileContent });
+      setSavedContent(fileContent);
+      toast.success(`Saved ${splitPath(selectedFile).name}`);
     } catch (e: any) {
-      setSaveStatus(`Save failed: ${e.message}`);
+      toast.error(`Save failed: ${e.message}`);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const toggleCommandExpanded = (idx: string) => {
-    setExpandedCommands((prev) => ({ ...prev, [idx]: !prev[idx] }));
-  };
-
-  const detectLanguage = (filePath: string) => {
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    switch (ext) {
-      case 'ts':
-      case 'tsx':
-        return 'typescript';
-      case 'js':
-      case 'jsx':
-        return 'javascript';
-      case 'py':
-        return 'python';
-      case 'json':
-        return 'json';
-      case 'html':
-        return 'html';
-      case 'css':
-        return 'css';
-      case 'md':
-        return 'markdown';
-      case 'sh':
-      case 'bash':
-      case 'ps1':
-        return 'shell';
-      default:
-        return 'plaintext';
+  const onPanelKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && activeTab === 'editor') {
+      e.preventDefault();
+      handleSaveFile();
     }
   };
 
-  const quickPrompts = [
-    'How are you? What can you do?',
-    'Write a python script to check system memory and CPU usage',
-    'Create a simple React counter component with increment and reset',
-    'Run tests with pytest to check current workspace health',
-  ];
+  const reviewPending = () => {
+    setMobileView('chat');
+    setTimeout(() => {
+      document.querySelector('[data-pending-action="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+  };
 
-  const filteredSessions = sessions.filter((s) =>
-    (s.title || '').toLowerCase().includes(sessionSearch.toLowerCase())
-  );
+  const filteredFiles = (manifest?.files ?? []).filter((f) => f.path.toLowerCase().includes(fileFilter.toLowerCase()));
+  const allCommands = messages.flatMap((m) => m.executed_commands ?? []);
+
+  /* ---------------- render ---------------- */
+
+  const showChat = isSplit || mobileView === 'chat';
+  const showPanel = isSplit ? panelOpen : mobileView === 'workspace';
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   return (
-    <div className="flex flex-col h-full bg-slate-950 text-slate-100 overflow-hidden">
-      {/* Top Studio Toolbar */}
-      <header className="h-14 border-b border-slate-800 bg-slate-900/90 px-4 flex items-center justify-between z-10 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 font-bold text-emerald-400">
-            <Bot className="w-5 h-5 text-emerald-400" />
-            <span className="text-slate-100 font-semibold tracking-wide">ForgeAgent Studio</span>
-            <span className="text-[10px] uppercase font-bold tracking-widest bg-emerald-500/10 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20">
-              Antigravity / Cursor Mode
-            </span>
-          </div>
+    <div className="relative flex h-full flex-col overflow-hidden bg-slate-950">
+      {/* Toolbar */}
+      <header className="flex shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-3 py-2 sm:px-4">
+        <IconButton
+          label={historyOpen ? 'Hide chat list' : 'Show chat list'}
+          aria-expanded={historyOpen}
+          onClick={() => setHistoryChoice(!historyOpen)}
+        >
+          {historyOpen ? <PanelLeftClose className="h-5 w-5" /> : <PanelLeftOpen className="h-5 w-5" />}
+        </IconButton>
+        <h1 className="min-w-0 flex-1 truncate text-base font-semibold text-slate-50">
+          Agent Studio
+          {activeSession?.title && <span className="hidden font-normal text-slate-500 sm:inline"> {'\u00b7'} {activeSession.title}</span>}
+        </h1>
 
-          {/* AI Brain Connector Selector */}
-          <div className="hidden md:flex items-center gap-1.5 ml-4 pl-4 border-l border-slate-800">
-            <span className="text-xs text-slate-400">Brain:</span>
-            <select
-              value={connectorName}
-              onChange={(e) => setConnectorName(e.target.value)}
-              className="bg-slate-800 border border-slate-700 text-xs rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-emerald-500"
-            >
-              <option value="chatgpt_edge">Microsoft Edge (ChatGPT Web - Unlimited Tokens)</option>
-              <option value="openai">OpenAI Compatible API</option>
-              <option value="ollama">Ollama (Local LLM)</option>
-              <option value="mock">Mock AI Adapter (Instant Test)</option>
-              <option value="browser_handoff">Manual Browser Handoff</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Toolbar Controls */}
-        <div className="flex items-center gap-3">
-          {/* Auto-Pilot Toggle */}
-          <button
-            onClick={() => setAutoPilot(!autoPilot)}
-            className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold border transition-all ${
-              autoPilot
-                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
-                : 'bg-slate-800 text-slate-400 border-slate-700'
-            }`}
-            title="Auto-Pilot: Automatically writes generated code, executes terminal commands, and auto-repairs failures in a loop."
+        {connectorName === 'chatgpt_edge' && (
+          <Button size="sm" icon={<ExternalLink className="h-3.5 w-3.5" />} onClick={handleOpenEdge} title="Open a visible Edge window so you can log in to ChatGPT">
+            <span className="hidden sm:inline">Open Edge to log in</span>
+            <span className="sm:hidden">Edge</span>
+          </Button>
+        )}
+        {!historyOpen && (
+          <Button size="sm" variant="primary" icon={<Plus className="h-4 w-4" />} onClick={handleNewChat}>
+            <span className="hidden sm:inline">New chat</span>
+            <span className="sm:hidden">New</span>
+          </Button>
+        )}
+        {isSplit && (
+          <Button
+            size="sm"
+            variant={panelOpen ? 'secondary' : 'ghost'}
+            aria-pressed={panelOpen}
+            icon={panelOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+            onClick={() => setPanelOpen(!panelOpen)}
+            title="Show or hide the files, editor and terminal"
           >
-            <Zap className={`w-3.5 h-3.5 ${autoPilot ? 'text-emerald-400 fill-emerald-400' : 'text-slate-400'}`} />
-            <span>Auto-Pilot: {autoPilot ? 'ON (Self-Executing)' : 'OFF (Review Only)'}</span>
-          </button>
-
-          {/* Open Edge Window for ChatGPT Login */}
-          <button
-            onClick={handleOpenEdge}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-emerald-300 hover:text-white bg-emerald-950/40 hover:bg-emerald-900/60 rounded border border-emerald-800/60 transition"
-            title="Open visible Microsoft Edge window on your screen to log into ChatGPT"
-          >
-            <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Open Edge (Log In)</span>
-          </button>
-
-          {/* New Chat Button */}
-          <button
-            onClick={handleClearHistory}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 rounded border border-slate-700 transition"
-            title="Start a new clean chat session"
-          >
-            <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-            <span>New Chat</span>
-          </button>
-        </div>
+            Workspace
+            {!!manifest?.total_files && <span className="rounded-full bg-slate-700 px-1.5 text-xs text-slate-200">{manifest.total_files}</span>}
+          </Button>
+        )}
       </header>
 
-      {/* Main Split Layout: Left Chat & Right IDE/Editor */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* CHAT HISTORY SIDEBAR (ChatGPT Style) */}
-        <aside
-          className={`transition-all duration-300 border-r border-slate-800 bg-slate-950/90 flex flex-col shrink-0 overflow-hidden ${
-            isSidebarOpen ? 'w-64' : 'w-0'
-          }`}
-        >
-          {/* Sidebar Top: New Chat & Refresh */}
-          <div className="p-3 border-b border-slate-800 flex items-center gap-2">
-            <button
-              onClick={handleCreateNewSession}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 transition shadow-sm"
-              title="Start a new chat thread"
-            >
-              <Plus className="w-3.5 h-3.5 text-emerald-400" />
-              <span>New Chat</span>
-            </button>
-            <button
-              onClick={() => loadSessions(true)}
-              disabled={isSyncingSessions}
-              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
-              title="Sync conversations with Microsoft Edge / ChatGPT"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSessions ? 'animate-spin text-emerald-400' : ''}`} />
-            </button>
-          </div>
+      {/* Chat / Workspace switch on narrower screens */}
+      {!isSplit && (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-800 px-3 py-2">
+          <Segmented
+            ariaLabel="Studio view"
+            value={mobileView}
+            onChange={setMobileView}
+            options={[
+              { value: 'chat', label: 'Chat' },
+              { value: 'workspace', label: 'Workspace', count: manifest?.total_files },
+            ]}
+          />
+          {pendingCount > 0 && mobileView !== 'chat' && (
+            <Button size="sm" variant="warning" onClick={reviewPending}>
+              {pendingCount} to approve
+            </Button>
+          )}
+        </div>
+      )}
 
-          {/* Search Bar */}
-          <div className="px-3 pt-2.5 pb-1">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search chats..."
-                value={sessionSearch}
-                onChange={(e) => setSessionSearch(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-800 rounded-md pl-8 pr-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-          </div>
-
-          {/* Conversations List */}
-          <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
-            <div className="px-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center justify-between">
-              <span>Saved Conversations</span>
-              <span className="text-[10px] font-normal text-slate-500">{filteredSessions.length}</span>
-            </div>
-
-            {filteredSessions.length === 0 ? (
-              <div className="text-center py-8 text-xs text-slate-600">
-                {sessionSearch ? 'No matching chats' : 'No chats found'}
-              </div>
-            ) : (
-              filteredSessions.map((s) => {
-                const isActive = s.id === activeSessionId;
-                return (
-                  <div
-                    key={s.id}
-                    onClick={() => handleSelectSession(s.id)}
-                    className={`group relative flex items-center justify-between px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-all ${
-                      isActive
-                        ? 'bg-slate-800/95 text-white font-medium border border-slate-700 shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0 pr-1">
-                      <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-emerald-400' : 'text-slate-500 group-hover:text-slate-300'}`} />
-                      <span className="truncate">{s.title || 'Untitled Chat'}</span>
-                    </div>
-
-                    <button
-                      onClick={(e) => handleDeleteSession(e, s.id)}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-rose-400 rounded hover:bg-slate-700/60 transition shrink-0"
-                      title="Delete conversation"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })
+      <div ref={containerRef} className={cn('relative flex min-h-0 flex-1', dragging && 'select-none')}>
+        {/* Chat list: docked on wide screens, drawer otherwise */}
+        {historyOpen && !historyInline && (
+          <div className="absolute inset-0 z-20 bg-black/60 animate-fade-in" onClick={() => setHistoryChoice(false)} aria-hidden />
+        )}
+        {historyOpen && (
+          <aside
+            aria-label="Chat list"
+            className={cn(
+              'bg-slate-950',
+              historyInline
+                ? 'w-64 shrink-0 border-r border-slate-800'
+                : 'absolute inset-y-0 left-0 z-30 w-72 max-w-[85%] border-r border-slate-700 shadow-2xl animate-slide-in-left',
             )}
-          </div>
-        </aside>
+          >
+            <SessionList
+              sessions={sessions}
+              activeId={activeSessionId}
+              syncing={isSyncingSessions}
+              loading={initialLoading}
+              onSelect={handleSelectSession}
+              onNew={handleNewChat}
+              onDelete={handleDeleteSession}
+              onSync={handleSync}
+              onPrune={handlePrune}
+            />
+          </aside>
+        )}
 
-        {/* LEFT PANEL: Chat with Brain & Agent Hands */}
-        <div className="flex-1 flex flex-col border-r border-slate-800 bg-slate-950/60 overflow-hidden min-w-[340px]">
-          {/* Chat Header with Active Thread Name & Collapse Toggle */}
-          <div className="h-10 px-3 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between text-xs text-slate-400 shrink-0">
-            <div className="flex items-center gap-2 overflow-hidden">
-              <button
-                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                className="p-1 hover:text-white rounded hover:bg-slate-800 transition"
-                title={isSidebarOpen ? "Collapse sidebar" : "Show chat history"}
-              >
-                {isSidebarOpen ? <PanelLeftClose className="w-4 h-4 text-slate-400" /> : <PanelLeftOpen className="w-4 h-4 text-emerald-400" />}
-              </button>
-              <span className="font-semibold text-slate-200 truncate max-w-xs">
-                {activeSession?.title || 'Chat'}
-              </span>
-              {activeSession?.chatgpt_id && (
-                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 shrink-0">
-                  ChatGPT Synced
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleCreateNewSession}
-                className="flex items-center gap-1 px-2 py-1 text-[11px] rounded bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
-                title="Start a new chat"
-              >
-                <Plus className="w-3 h-3 text-emerald-400" />
-                <span>New Chat</span>
-              </button>
-            </div>
-          </div>
-          {/* Chat Messages Scrollable */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-6">
-                <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-500/5">
-                  <Sparkles className="w-7 h-7" />
-                </div>
-                <div className="space-y-1.5 max-w-md">
-                  <h3 className="text-base font-semibold text-slate-200">
-                    Welcome to ForgeAgent Studio
-                  </h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Talk naturally with ChatGPT. ForgeAgent operates as the autonomous hands on your local machine—writing files, executing commands, running tests, and fixing bugs.
+        {/* Conversation */}
+        <section aria-label="Conversation" className={cn('min-w-0 flex-1 flex-col', showChat ? 'flex' : 'hidden')}>
+          <div
+            role="log"
+            aria-live="polite"
+            aria-label="Conversation messages"
+            className="flex-1 overflow-y-auto px-3 py-5 sm:px-6"
+          >
+            <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col space-y-5">
+            {loadError ? (
+              <ErrorState title="Couldn't load Studio" message={loadError} onRetry={loadAll} className="mx-auto max-w-md" />
+            ) : initialLoading && messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center gap-2 text-sm text-slate-400">
+                <Spinner /> Loading your chats…
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center gap-6 py-8 text-center">
+                <Mascot mood="happy" size={104} label="Forge the robot waving hello" className="drop-shadow-xl" />
+                <div className="space-y-2">
+                  <h2 className="text-xl font-semibold text-slate-50">What should we build?</h2>
+                  <p className="text-sm leading-relaxed text-slate-400">
+                    Tell {meta.short} what you want. ForgeAgent writes the files and runs commands on your machine, and asks you before anything risky.
                   </p>
                 </div>
-
-                {/* Quick Prompts */}
-                <div className="w-full max-w-md space-y-2 text-left">
-                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                    Suggested Prompts:
-                  </span>
-                  <div className="grid grid-cols-1 gap-2">
-                    {quickPrompts.map((p, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleSendMessage(p)}
-                        className="text-left text-xs bg-slate-900/90 hover:bg-slate-800/90 text-slate-300 hover:text-slate-100 p-2.5 rounded-md border border-slate-800 hover:border-slate-700 transition-all"
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
+                <div className="grid w-full gap-2 sm:grid-cols-2">
+                  {QUICK_PROMPTS.map((p) => (
+                    <button
+                      key={p.title}
+                      type="button"
+                      onClick={() => handleSendMessage(p.text)}
+                      className="rounded-2xl border border-slate-800 bg-slate-900 p-3.5 text-left transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:bg-slate-800 hover:shadow-lg hover:shadow-brand-500/10"
+                    >
+                      <span className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                        <span className="text-lg" aria-hidden>
+                          {p.emoji}
+                        </span>
+                        {p.title}
+                      </span>
+                      <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">{p.text}</span>
+                    </button>
+                  ))}
                 </div>
               </div>
             ) : (
-              messages.map((msg, index) => {
-                const isUser = msg.sender === 'user';
-                return (
-                  <div
-                    key={msg.id || index}
-                    className={`flex flex-col group ${isUser ? 'items-end' : 'items-start'}`}
-                  >
-                    <div className="flex items-center gap-2 mb-1 px-1 text-[11px] text-slate-500">
-                      <span>{isUser ? 'You' : 'ForgeAgent (ChatGPT Brain)'}</span>
-                      <span>•</span>
-                      <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      {!isUser && (
-                        <button
-                          onClick={() => handleCopyText(msg.id || String(index), msg.clean_message || msg.text)}
-                          className="opacity-0 group-hover:opacity-100 transition text-[11px] text-slate-400 hover:text-white flex items-center gap-1 ml-2"
-                          title="Copy full message"
-                        >
-                          {copiedId === (msg.id || String(index)) ? (
-                            <>
-                              <Check className="w-3 h-3 text-emerald-400" />
-                              <span className="text-emerald-400">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3" />
-                              <span>Copy</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                    </div>
-
-                    <div
-                      className={`max-w-[92%] rounded-xl px-4 py-3 text-xs leading-relaxed ${
-                        isUser
-                          ? 'bg-blue-600/90 text-white rounded-tr-none'
-                          : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
-                      }`}
-                    >
-                      {/* Formatted Message Body with Code Block Cards */}
-                      <div>
-                        {renderMessageContent(msg.clean_message || msg.text)}
-                      </div>
-
-                      {/* File Modifications ("The Hands" executed changes) */}
-                      {msg.executed_file_changes && msg.executed_file_changes.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2">
-                          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Files written to workspace:</span>
-                          </div>
-                          <div className="space-y-1.5">
-                            {msg.executed_file_changes.map((fc, fIdx) => (
-                              <div
-                                key={fIdx}
-                                className="flex items-center justify-between bg-slate-950/70 border border-slate-800/90 px-2.5 py-1.5 rounded text-xs"
-                              >
-                                <div className="flex items-center gap-2 overflow-hidden">
-                                  <FileCode className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                                  <span className="font-mono text-slate-300 truncate">{fc.path}</span>
-                                  <span className="text-[10px] text-slate-500">({fc.lines} lines)</span>
-                                </div>
-                                <button
-                                  onClick={() => handleOpenFile(fc.path)}
-                                  className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 px-2 py-0.5 rounded border border-emerald-500/20 transition shrink-0"
-                                >
-                                  <Eye className="w-3 h-3" />
-                                  <span>View in Editor</span>
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Executed Commands ("The Hands" terminal runs) */}
-                      {msg.executed_commands && msg.executed_commands.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2">
-                          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
-                            <Terminal className="w-3.5 h-3.5 text-slate-400" />
-                            <span>Executed Terminal Commands:</span>
-                          </div>
-                          <div className="space-y-1.5">
-                            {msg.executed_commands.map((cmd, cIdx) => {
-                              const cmdKey = `${index}-${cIdx}`;
-                              const isExp = !!expandedCommands[cmdKey];
-                              const isPassed = cmd.passed ?? cmd.exit_code === 0;
-
-                              return (
-                                <div
-                                  key={cIdx}
-                                  className="bg-slate-950 border border-slate-800/90 rounded overflow-hidden text-xs"
-                                >
-                                  <div
-                                    onClick={() => toggleCommandExpanded(cmdKey)}
-                                    className="flex items-center justify-between px-2.5 py-1.5 cursor-pointer hover:bg-slate-900/60 transition"
-                                  >
-                                    <div className="flex items-center gap-2 overflow-hidden">
-                                      {isPassed ? (
-                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                      ) : (
-                                        <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                                      )}
-                                      <span className="font-mono text-slate-300 truncate">{cmd.command}</span>
-                                    </div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <span
-                                        className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
-                                          isPassed
-                                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                                        }`}
-                                      >
-                                        exit {cmd.exit_code}
-                                      </span>
-                                      {isExp ? (
-                                        <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-                                      ) : (
-                                        <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Command Output Accordion */}
-                                  {isExp && (
-                                    <div className="p-2 border-t border-slate-800/80 bg-black/60 font-mono text-[11px] text-slate-300 max-h-48 overflow-y-auto space-y-1">
-                                      {cmd.stdout && (
-                                        <div>
-                                          <span className="text-[10px] text-slate-500 uppercase block">STDOUT:</span>
-                                          <pre className="whitespace-pre-wrap">{cmd.stdout}</pre>
-                                        </div>
-                                      )}
-                                      {cmd.stderr && (
-                                        <div>
-                                          <span className="text-[10px] text-rose-400 uppercase block">STDERR:</span>
-                                          <pre className="whitespace-pre-wrap text-rose-300">{cmd.stderr}</pre>
-                                        </div>
-                                      )}
-                                      {!cmd.stdout && !cmd.stderr && (
-                                        <div className="text-slate-500 italic">No output produced.</div>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Repair Iterations Badge */}
-                      {msg.repair_iterations && msg.repair_iterations > 0 ? (
-                        <div className="mt-2 text-[11px] text-amber-400 flex items-center gap-1.5">
-                          <Zap className="w-3 h-3 text-amber-400" />
-                          <span>Auto-pilot repaired failure after {msg.repair_iterations} iteration(s).</span>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })
+              messages.map((msg, i) => (
+                <MessageView
+                  key={msg.id || i}
+                  msg={msg}
+                  assistantName={meta.short}
+                  busyAction={busyAction}
+                  onOpenFile={(p) => handleOpenFile(p)}
+                  onDecide={handleDecideAction}
+                />
+              ))
             )}
 
-            {/* Thinking / Executing Indicator */}
             {isLoading && (
-              <div className="flex flex-col items-start space-y-1">
-                <div className="px-1 text-[11px] text-slate-500">ForgeAgent (ChatGPT Brain)</div>
-                <div className="bg-slate-900 border border-slate-800 rounded-xl rounded-tl-none px-4 py-3 flex items-center gap-3 text-xs text-slate-300 shadow-sm">
-                  <div className="w-4 h-4 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
-                  <span>ChatGPT is analyzing & agent hands are executing changes...</span>
+              <div className="flex gap-3" role="status">
+                <Mascot mood="thinking" size={36} />
+                <div className="flex items-center gap-3 rounded-2xl rounded-tl-md border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-200">
+                  <span>
+                    {WORKING_PHRASES[Math.floor(elapsed / 4) % WORKING_PHRASES.length]}
+                    <span className="text-slate-400"> with {meta.short}</span>
+                  </span>
+                  <span className="flex items-center gap-1" aria-hidden>
+                    {[0, 1, 2].map((i) => (
+                      <span key={i} className="h-1.5 w-1.5 animate-bounce-dot rounded-full bg-brand-400" style={{ animationDelay: `${i * 0.16}s` }} />
+                    ))}
+                  </span>
+                  <span className="text-xs text-slate-500">{elapsed}s</span>
                 </div>
               </div>
             )}
             <div ref={chatEndRef} />
+            </div>
           </div>
 
-          {/* Chat Input Bar */}
-          <div className="p-3 border-t border-slate-800 bg-slate-900/80">
-            <div className="flex flex-col bg-slate-950 border border-slate-800 focus-within:border-emerald-500 rounded-lg p-2.5 transition">
-              <textarea
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Message ChatGPT (e.g. 'Build a CLI tool', 'Fix the bug in main.py', 'How are you?')..."
-                className="w-full bg-transparent resize-none text-xs text-slate-200 placeholder-slate-500 focus:outline-none min-h-[56px] max-h-36 font-sans"
-                rows={2}
-                disabled={isLoading}
-              />
-              <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 mt-1">
-                <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  <span>Enter to send • Shift+Enter for new line</span>
-                </div>
-                <button
+          {/* Approval reminder */}
+          {pendingCount > 0 && (
+            <div className="flex items-center justify-between gap-3 border-t border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-sm text-amber-100">
+              <span className="flex items-center gap-2">
+                <Mascot mood="alert" size={24} />
+                {pendingCount} action{pendingCount === 1 ? '' : 's'} waiting for your approval
+              </span>
+              <Button size="sm" variant="warning" onClick={reviewPending}>
+                Review
+              </Button>
+            </div>
+          )}
+
+          {/* Composer: one slim row for the message, one quiet row for the settings */}
+          <div className="border-t border-slate-800 bg-slate-900/60 px-3 pb-2 pt-2.5 sm:px-6">
+            <div className="mx-auto max-w-3xl space-y-1.5">
+              <div className="flex items-end gap-2 rounded-2xl border border-slate-700 bg-slate-950 p-1.5 shadow-sm transition-colors focus-within:border-brand-500">
+                <textarea
+                  ref={textareaRef}
+                  value={inputMessage}
+                  onChange={(e) => {
+                    setInputMessage(e.target.value);
+                    autoGrow(e.target);
+                  }}
+                  onKeyDown={handleKeyDown}
+                  aria-label="Message to ForgeAgent"
+                  placeholder="Ask ForgeAgent to build, fix or explain something…"
+                  rows={1}
+                  disabled={isLoading}
+                  className="block max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent px-2.5 py-1.5 text-sm leading-relaxed text-slate-100 placeholder:text-slate-500 focus-visible:outline-none disabled:opacity-60"
+                />
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="h-9 w-9 shrink-0 rounded-xl px-0"
+                  aria-label="Send message"
+                  title="Send (Enter). Shift+Enter for a new line."
                   onClick={() => handleSendMessage()}
                   disabled={!inputMessage.trim() || isLoading}
-                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white disabled:text-slate-500 px-3 py-1.5 rounded-md text-xs font-semibold transition"
                 >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>Send</span>
-                </button>
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-slate-400">
+                <Select
+                  aria-label="AI engine"
+                  value={connectorName}
+                  onChange={(e) => handleConnectorChange(e.target.value)}
+                  className="h-7 w-auto max-w-[13rem] rounded-lg border-transparent bg-transparent py-0 text-xs hover:border-slate-700"
+                >
+                  {CONNECTORS.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
+                    </option>
+                  ))}
+                </Select>
+                <Switch compact checked={autoPilot} onChange={setAutoPilot} label="Auto-run safe commands" />
+                {isEmergencyStopActive && <span className="text-rose-300">Emergency stop is on, so nothing will run</span>}
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
-        {/* RIGHT PANEL: Workspace IDE & Monaco Editor */}
-        <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden min-w-[380px]">
-          {/* Right Panel Tabs Header */}
-          <div className="h-10 border-b border-slate-800 bg-slate-900/60 px-3 flex items-center justify-between shrink-0">
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setActiveTab('editor')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t border-b-2 transition ${
-                  activeTab === 'editor'
-                    ? 'border-emerald-500 text-emerald-400 bg-slate-800/40'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Code2 className="w-3.5 h-3.5" />
-                <span>Editor {selectedFile ? `(${selectedFile.split(/[/\\]/).pop()})` : ''}</span>
-              </button>
+        {/* Drag handle */}
+        {isSplit && panelOpen && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize workspace panel"
+            aria-valuenow={Math.round(effectivePanel)}
+            aria-valuemin={PANEL_MIN}
+            tabIndex={0}
+            onPointerDown={onDividerDown}
+            onKeyDown={onDividerKey}
+            className={cn(
+              'group relative w-1.5 shrink-0 cursor-col-resize bg-slate-800 transition-colors hover:bg-brand-500/60 focus-visible:bg-brand-500/60',
+              dragging && 'bg-brand-500/60',
+            )}
+          >
+            <span className="absolute inset-y-0 -left-1.5 -right-1.5" aria-hidden />
+          </div>
+        )}
 
-              <button
-                onClick={() => setActiveTab('files')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t border-b-2 transition ${
-                  activeTab === 'files'
-                    ? 'border-emerald-500 text-emerald-400 bg-slate-800/40'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                <span>Files ({manifest?.total_files || 0})</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab('terminal')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t border-b-2 transition ${
-                  activeTab === 'terminal'
-                    ? 'border-emerald-500 text-emerald-400 bg-slate-800/40'
-                    : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Terminal className="w-3.5 h-3.5" />
-                <span>Terminal Output</span>
-              </button>
-            </div>
-
-            {/* Right Header Actions */}
-            {activeTab === 'editor' && selectedFile && (
-              <div className="flex items-center gap-2">
-                {saveStatus && (
-                  <span className="text-[11px] text-emerald-400 font-medium">{saveStatus}</span>
-                )}
+        {/* Workspace panel */}
+        <section
+          aria-label="Workspace"
+          onKeyDown={onPanelKeyDown}
+          style={isSplit ? { width: effectivePanel } : undefined}
+          className={cn('min-w-0 flex-col bg-slate-950', showPanel ? 'flex' : 'hidden', isSplit ? 'shrink-0' : 'flex-1')}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/60 px-2">
+            <div role="tablist" aria-label="Workspace views" className="flex">
+              {(
+                [
+                  { id: 'editor', label: selectedFile ? splitPath(selectedFile).name : 'Editor', icon: Code2, dot: dirty },
+                  { id: 'files', label: `Files${manifest ? ` (${manifest.total_files})` : ''}`, icon: FolderOpen },
+                  { id: 'terminal', label: 'Terminal', icon: Terminal },
+                ] as const
+              ).map((t) => (
                 <button
-                  onClick={handleSaveFile}
-                  disabled={isSaving}
-                  className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 px-2 py-1 rounded text-xs border border-slate-700 transition"
-                  title="Save current file changes"
+                  key={t.id}
+                  role="tab"
+                  type="button"
+                  aria-selected={activeTab === t.id}
+                  onClick={() => setActiveTab(t.id)}
+                  className={cn(
+                    'flex max-w-[11rem] items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors',
+                    activeTab === t.id ? 'border-brand-500 text-brand-300' : 'border-transparent text-slate-400 hover:text-slate-100',
+                  )}
                 >
-                  <Save className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Save</span>
+                  <t.icon className="h-4 w-4 shrink-0" aria-hidden />
+                  <span className="truncate">{t.label}</span>
+                  {'dot' in t && t.dot && <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400" title="Unsaved changes" aria-label="Unsaved changes" />}
                 </button>
-              </div>
-            )}
-
-            {activeTab === 'files' && (
-              <button
-                onClick={loadWorkspaceFiles}
-                className="flex items-center gap-1 text-slate-400 hover:text-slate-200 text-xs px-2 py-1 rounded hover:bg-slate-800 transition"
-                title="Refresh file tree"
+              ))}
+            </div>
+            {activeTab === 'editor' && selectedFile && (
+              <Button
+                size="sm"
+                variant={dirty ? 'primary' : 'secondary'}
+                icon={<Save className="h-3.5 w-3.5" />}
+                onClick={handleSaveFile}
+                loading={isSaving}
+                disabled={!dirty}
+                title="Save (Ctrl+S)"
               >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Refresh</span>
-              </button>
+                Save
+              </Button>
+            )}
+            {activeTab === 'files' && (
+              <IconButton label="Refresh files" size="sm" onClick={loadWorkspaceFiles}>
+                <RefreshCw className="h-4 w-4" />
+              </IconButton>
             )}
           </div>
 
-          {/* Right Panel Body */}
-          <div className="flex-1 overflow-hidden relative">
-            {/* TAB 1: MONACO EDITOR */}
-            {activeTab === 'editor' && (
-              <div className="h-full flex flex-col">
-                {selectedFile ? (
-                  <>
-                    <div className="px-3 py-1 bg-slate-900 border-b border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
-                      <span className="font-mono text-slate-300">{selectedFile}</span>
-                      <span className="text-slate-500 font-mono uppercase">{detectLanguage(selectedFile)}</span>
-                    </div>
-                    <div className="flex-1 overflow-hidden">
-                      <MonacoEditorView
-                        value={fileContent}
-                        language={detectLanguage(selectedFile)}
-                        readOnly={false}
-                        onChange={(val) => setFileContent(val || '')}
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4 text-slate-500">
-                    <FileCode className="w-10 h-10 text-slate-600" />
-                    <div className="space-y-1">
-                      <h4 className="text-sm font-semibold text-slate-300">No File Open</h4>
-                      <p className="text-xs max-w-xs">
-                        Select a file from the Files tab, or ask ChatGPT to create/edit code to inspect it here in Monaco.
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setActiveTab('files')}
-                      className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded border border-slate-700 transition"
-                    >
-                      Browse Workspace Files
-                    </button>
+          <div className="relative min-h-0 flex-1" role="tabpanel">
+            {activeTab === 'editor' &&
+              (selectedFile ? (
+                <div className="flex h-full flex-col">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-3 py-1.5 text-xs">
+                    <span className="truncate font-mono text-slate-300" title={selectedFile}>
+                      {selectedFile}
+                    </span>
+                    <span className="shrink-0 text-slate-400">{detectLanguage(selectedFile)}</span>
                   </div>
-                )}
-              </div>
-            )}
+                  <div className="min-h-0 flex-1">
+                    <MonacoEditorView
+                      value={fileContent}
+                      language={detectLanguage(selectedFile)}
+                      readOnly={false}
+                      onChange={(val) => setFileContent(val || '')}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+                  <FileCode className="h-10 w-10 text-slate-600" aria-hidden />
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-semibold text-slate-100">No file open</h3>
+                    <p className="max-w-xs text-sm text-slate-400">Files the agent writes open here automatically. You can also pick one from the file list.</p>
+                  </div>
+                  <Button size="sm" onClick={() => setActiveTab('files')}>
+                    Browse files
+                  </Button>
+                </div>
+              ))}
 
-            {/* TAB 2: WORKSPACE FILE EXPLORER */}
             {activeTab === 'files' && (
-              <div className="h-full flex flex-col p-3 overflow-hidden">
+              <div className="flex h-full flex-col gap-2 p-3">
                 <input
-                  type="text"
-                  placeholder="Filter files..."
+                  type="search"
+                  aria-label="Filter files"
+                  placeholder="Filter files"
                   value={fileFilter}
                   onChange={(e) => setFileFilter(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-500 mb-2 focus:outline-none focus:border-emerald-500"
+                  className="h-9 w-full rounded-lg border border-slate-800 bg-slate-900 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus-visible:border-brand-500"
                 />
-                <div className="flex-1 overflow-y-auto space-y-1 pr-1 font-mono text-xs">
-                  {manifest?.files
-                    .filter((f) => f.path.toLowerCase().includes(fileFilter.toLowerCase()))
-                    .map((f, fIdx) => (
-                      <div
-                        key={fIdx}
-                        onClick={() => handleOpenFile(f.path)}
-                        className={`flex items-center justify-between px-2.5 py-1.5 rounded cursor-pointer transition ${
-                          selectedFile === f.path
-                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                            : 'hover:bg-slate-800/70 text-slate-300'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 overflow-hidden">
-                          <FileCode className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="truncate">{f.path}</span>
-                        </div>
-                        <span className="text-[10px] text-slate-500 shrink-0">
-                          {(f.size_bytes / 1024).toFixed(1)} KB
-                        </span>
-                      </div>
-                    ))}
-                  {(!manifest?.files || manifest.files.length === 0) && (
-                    <div className="text-xs text-slate-500 text-center py-8">
-                      No files found in workspace root.
-                    </div>
+                {manifest && (
+                  <p className="truncate px-1 text-xs text-slate-500" title={manifest.root_path}>
+                    {manifest.root_path}
+                  </p>
+                )}
+                <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto">
+                  {filteredFiles.map((f) => {
+                    const { dir, name } = splitPath(f.path);
+                    return (
+                      <li key={f.path}>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenFile(f.path)}
+                          aria-current={selectedFile === f.path ? 'true' : undefined}
+                          className={cn(
+                            'flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left font-mono text-[13px] transition-colors',
+                            selectedFile === f.path ? 'bg-brand-500/15 text-brand-200' : 'text-slate-300 hover:bg-slate-900',
+                          )}
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <FileCode className="h-4 w-4 shrink-0 text-slate-500" aria-hidden />
+                            <span className="truncate">
+                              <span className="text-slate-500">{dir}</span>
+                              <span className="font-medium">{name}</span>
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-xs text-slate-500">{formatBytes(f.size_bytes)}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {filteredFiles.length === 0 && (
+                    <li className="px-3 py-10 text-center text-sm text-slate-400">
+                      {manifest?.files.length ? 'No files match your filter.' : 'The workspace is empty. Ask the agent to create something.'}
+                    </li>
                   )}
-                </div>
+                </ul>
               </div>
             )}
 
-            {/* TAB 3: TERMINAL LOGS */}
             {activeTab === 'terminal' && (
-              <div className="h-full p-3 font-mono text-xs overflow-y-auto bg-black/80 text-slate-300 space-y-2">
-                <div className="text-[11px] text-emerald-400 font-bold mb-2">
-                  === Agent Execution Log & Diagnostic Stream ===
-                </div>
-                {messages
-                  .filter((m) => m.executed_commands && m.executed_commands.length > 0)
-                  .flatMap((m) => m.executed_commands || [])
-                  .map((cmd, i) => (
-                    <div key={i} className="border-b border-slate-900 pb-2 space-y-1">
-                      <div className="flex items-center gap-2 text-slate-400">
-                        <span className="text-emerald-400 font-bold">&gt;</span>
-                        <span className="text-slate-100">{cmd.command}</span>
-                        <span
-                          className={`text-[10px] px-1 rounded ${
-                            cmd.passed || cmd.exit_code === 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
-                          }`}
-                        >
-                          exit: {cmd.exit_code} ({cmd.duration_ms}ms)
-                        </span>
+              <div className="h-full overflow-y-auto bg-slate-950 p-3 font-mono text-[13px]">
+                {allCommands.length === 0 ? (
+                  <p className="py-10 text-center font-sans text-sm text-slate-400">Commands the agent runs in this chat will show up here.</p>
+                ) : (
+                  allCommands.map((cmd, i) => {
+                    const ok = cmd.status !== 'BLOCKED' && (cmd.passed ?? cmd.exit_code === 0);
+                    return (
+                      <div key={i} className="space-y-1 border-b border-slate-800/70 py-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-emerald-400">$</span>
+                          <span className="break-all text-slate-100">{cmd.command}</span>
+                          <Badge tone={cmd.status === 'BLOCKED' ? 'warning' : ok ? 'success' : 'danger'}>
+                            {cmd.status === 'BLOCKED' ? 'blocked' : `exit ${cmd.exit_code}`}
+                            {cmd.duration_ms !== undefined && ` · ${cmd.duration_ms} ms`}
+                          </Badge>
+                        </div>
+                        {cmd.stdout && <pre className="whitespace-pre-wrap pl-4 text-slate-300">{cmd.stdout}</pre>}
+                        {cmd.stderr && <pre className="whitespace-pre-wrap pl-4 text-rose-300">{cmd.stderr}</pre>}
                       </div>
-                      {cmd.stdout && <pre className="whitespace-pre-wrap text-slate-300 pl-4">{cmd.stdout}</pre>}
-                      {cmd.stderr && <pre className="whitespace-pre-wrap text-rose-300 pl-4">{cmd.stderr}</pre>}
-                    </div>
-                  ))}
-                {messages.filter((m) => m.executed_commands && m.executed_commands.length > 0).length === 0 && (
-                  <div className="text-slate-500 italic py-6 text-center">
-                    No commands executed yet in this session.
-                  </div>
+                    );
+                  })
                 )}
               </div>
             )}
           </div>
-        </div>
+        </section>
       </div>
     </div>
   );
 };
-

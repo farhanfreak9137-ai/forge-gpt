@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTheme } from '../../lib/theme';
 import Editor from '@monaco-editor/react';
 
 interface MonacoEditorViewProps {
@@ -16,13 +17,14 @@ export const MonacoEditorView: React.FC<MonacoEditorViewProps> = ({
   onChange,
   height = '100%',
 }) => {
+  const { resolved } = useTheme();
   return (
     <div className="w-full h-full border border-slate-800 rounded-md overflow-hidden bg-slate-950">
       <Editor
         height={height}
         language={language}
         value={value}
-        theme="vs-dark"
+        theme={resolved === 'light' ? 'light' : 'vs-dark'}
         onChange={onChange}
         options={{
           readOnly,

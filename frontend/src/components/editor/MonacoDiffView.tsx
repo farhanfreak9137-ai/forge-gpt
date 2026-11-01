@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTheme } from '../../lib/theme';
 import { DiffEditor } from '@monaco-editor/react';
 
 interface MonacoDiffViewProps {
@@ -14,6 +15,7 @@ export const MonacoDiffView: React.FC<MonacoDiffViewProps> = ({
   language = 'python',
   height = '100%',
 }) => {
+  const { resolved } = useTheme();
   return (
     <div className="w-full h-full border border-slate-800 rounded-md overflow-hidden bg-slate-950">
       <DiffEditor
@@ -21,7 +23,7 @@ export const MonacoDiffView: React.FC<MonacoDiffViewProps> = ({
         language={language}
         original={original}
         modified={modified}
-        theme="vs-dark"
+        theme={resolved === 'light' ? 'light' : 'vs-dark'}
         options={{
           readOnly: true,
           renderSideBySide: true,
